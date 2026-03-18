@@ -1,4 +1,1 @@
-colcon build --packages-select msg_srv 
-colcon build --packages-select dis_tutorial3 --symlink-install
-colcon build --packages-select dis_tutorial4 --symlink-install
-colcon build --packages-select task1 --symlink-install
+colcon build --symlink-install --merge-install
