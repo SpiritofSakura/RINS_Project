@@ -13,10 +13,9 @@ find_package(ament_cmake REQUIRED)
 
 find_package(rosidl_default_generators REQUIRED)
 
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/Dn2.msg"
-  "srv/Dn2.srv"
-)
+#rosidl_generate_interfaces(${PROJECT_NAME}
+# enter interfaces here
+#)
 
 ament_export_dependencies(rosidl_default_runtime)
 
