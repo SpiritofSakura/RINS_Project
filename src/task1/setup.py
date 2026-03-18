@@ -23,11 +23,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-<<<<<<< HEAD
             'waypoint_navigator = task1.waypoint_navigator:main',
-=======
             'face_localizator = task1.face_localizator:main',
->>>>>>> origin/main
         ],
     },
 )
