@@ -1,4 +1,4 @@
-**TODO LIST:**
+**TODO LIST (Task1):**
 - Razmislit o pathu, ki ga bomo naredili pri detektiranju obrazov.
 - Face Detection tako, da ko enkrat obraz "pravilno" zazna, ga naslednjič ignorira.
 - Ring Detection
@@ -26,3 +26,7 @@ colcon build --packages-select <naslov-paketa> --symlink-install
 - face_localizator.py 
   - listens on /people_marker and if detection fires 20 times in 1m radius, a persistent marker is published
   - later this will be used to visit the face
+
+
+**FIXES**:
+- If command "colcon build" doesn't work, add prefix --merge-install
