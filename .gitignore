@@ -1,0 +1,52 @@
+# =========================
+# ROS 2 / colcon workspace
+# =========================
+build/
+install/
+log/
+
+# Colcon metadata
+.colcon/
+
+# =========================
+# CMake
+# =========================
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# =========================
+# Compiled objects
+# =========================
+*.o
+*.so
+*.a
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Editor / OS
+# =========================
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# =========================
+# Environment files
+# =========================
+.env
