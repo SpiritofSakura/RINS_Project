@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'face_localizator = task1.face_localizator:main',
         ],
     },
 )
