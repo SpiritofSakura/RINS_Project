@@ -27,12 +27,14 @@ class detect_faces(Node):
 			namespace='',
 			parameters=[
 				('device', ''),
+				('enabled', False),
 		])
 
 		marker_topic = "/people_marker"
 
 		self.detection_color = (0,0,255)
 		self.device = self.get_parameter('device').get_parameter_value().string_value
+		self.enabled = self.get_parameter('enabled').get_parameter_value().bool_value
 
 		self.bridge = CvBridge()
 		self.scan = None
@@ -46,11 +48,16 @@ class detect_faces(Node):
 
 		self.faces = []
 
-		self.get_logger().info(f"Node has been initialized! Will publish face markers to {marker_topic}.")
+		status = "enabled" if self.enabled else "disabled"
+		self.get_logger().info(f"Node has been initialized! Detection is {status}. Will publish face markers to {marker_topic}.")
 
 	def rgb_callback(self, data):
 
 		self.faces = []
+
+		# Only process frames if detection is enabled
+		if not self.enabled:
+			return
 
 		try:
 			cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
