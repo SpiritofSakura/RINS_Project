@@ -11,6 +11,9 @@ import math
 class FaceLocalizator(Node):
     def __init__(self):
         super().__init__('face_localizator')
+
+        # threshold for number of detections to consider a location as a face location
+        self.threshold_detections = 15
         
         # Initialize tf2 buffer and listener
         self.tf_buffer = tf2_ros.Buffer()
@@ -152,7 +155,7 @@ class FaceLocalizator(Node):
                 detections_in_radius += 1
         
         # If 20+ detections and location not already marked, mark it
-        if detections_in_radius >= 20:
+        if detections_in_radius >= self.threshold_detections:
             # Check if location already marked (within 0.5m of existing mark)
             already_marked = False
             for marked_x, marked_y in self.marked_locations:
