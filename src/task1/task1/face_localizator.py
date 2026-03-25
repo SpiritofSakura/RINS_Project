@@ -147,11 +147,11 @@ class FaceLocalizator(Node):
         Check if there are 20+ detections within 1m radius (2D) of (x, y).
         If yes and not already marked, publish a persistent marker.
         """
-        # Count detections within 1m radius (2D distance)
+        # Count detections within 1.5m radius (2D distance)
         detections_in_radius = 0
         for det_x, det_y, _ in self.all_detections:
             distance = math.sqrt((det_x - x)**2 + (det_y - y)**2)
-            if distance <= 1.0:
+            if distance <= 1.5:
                 detections_in_radius += 1
         
         # If 20+ detections and location not already marked, mark it
