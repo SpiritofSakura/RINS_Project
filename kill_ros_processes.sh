@@ -23,6 +23,9 @@ fi
 echo "Killing PIDs: $ALL_PIDS"
 echo "$ALL_PIDS" | xargs -r kill -9
 
+echo "Killing Python processes"
+pkill -9 -f python3
+
 echo "Verifying..."
 echo "--- /opt/ros/jazzy processes ---"
 ps aux | grep '/opt/ros/jazzy' | grep -v grep

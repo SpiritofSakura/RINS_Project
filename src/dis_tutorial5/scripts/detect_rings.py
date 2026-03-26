@@ -11,173 +11,194 @@ from geometry_msgs.msg import PointStamped, Vector3, Pose
 from cv_bridge import CvBridge, CvBridgeError
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
-from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
-qos_profile = QoSProfile(
-          durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-          reliability=QoSReliabilityPolicy.RELIABLE,
-          history=QoSHistoryPolicy.KEEP_LAST,
-          depth=1)
+# Uvozimo potrebne QoS nastavitve
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 class RingDetector(Node):
     def __init__(self):
-        super().__init__('transform_point')
+        super().__init__('ring_detector') # Popravljeno ime vozlišča
 
-        # Basic ROS stuff
-        timer_frequency = 5
-        timer_period = 1/timer_frequency
-
-        # ellipse thresholds
-        self.ecc_thr = 100
-        self.ratio_thr = 1.5
+        # Pragovi za elipse - dodani omejitve velikosti
+        self.ecc_thr = 300 
+        self.ratio_thr = 1.5  # Razumna razmerja za krožne oblike
         self.center_thr = 10
+        self.min_area = 200  # Minimalna površina elipse (približno)
+        self.max_area = 15000  # Maksimalna površina elipse
+        self.depth_threshold = 1.5  # Globina za detekcijo lebdečega obroča
 
-        # An object we use for converting images between ROS format and OpenCV format
+        # Most za pretvorbo slik
         self.bridge = CvBridge()
+        self.depth_image = None
 
-        # Subscribe to the image and/or depth topic
-        self.image_sub = self.create_subscription(Image, "/oakd/rgb/preview/image_raw", self.image_callback, 1)
-        self.depth_sub = self.create_subscription(Image, "/oakd/rgb/preview/depth", self.depth_callback, 1)
+        # Nastavimo QoS na BEST_EFFORT, da se ujema s simulatorjem (globina)
+        depth_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1
+        )
 
+        # Naročnine - uporabimo privzeto QoS (10) za RGB, ker je bolj zanesljivo
+        self.image_sub = self.create_subscription(Image, "/oakd/rgb/preview/image_raw", self.image_callback, 10)
+        # Za globino pa nujno BEST_EFFORT
+        self.depth_sub = self.create_subscription(Image, "/oakd/rgb/preview/depth", self.depth_callback, depth_qos)
+
+        # Dodamo Publisher za markerje obročev, da jih vidiš v RViz
+        self.marker_pub = self.create_publisher(Marker, "/ring_marker", 10)
+
+        # Okna za vizualizacijo
         cv2.namedWindow("Binary Image", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Detected contours", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Detected rings", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Depth window", cv2.WINDOW_NORMAL)        
+        
+        self.get_logger().info("Detektor obročev (z globino) zagnan!")
+
+    def check_ring_variance(self, ellipse):
+        """Preverimo varianco globine - pravi obroči imajo visoko varianco (luknja v sredini)"""
+        cx, cy = int(ellipse[0][0]), int(ellipse[0][1])
+        a, b = ellipse[1][0] / 2, ellipse[1][1] / 2
+        
+        # Preverimo če so koordinate veljalne
+        if not (0 <= cy < self.depth_image.shape[0] and 0 <= cx < self.depth_image.shape[1]):
+            return False
+        
+        # Preberemo globine na različnih točkah
+        depths = []
+        
+        # Globina v sredini
+        center_depth = self.depth_image[cy, cx]
+        depths.append(center_depth)
+        
+        # Globine na robovih elipse (4 točke)
+        for angle in [0, 90, 180, 270]:
+            rad = np.radians(angle)
+            px = int(cx + a * np.cos(rad))
+            py = int(cy + b * np.sin(rad))
+            
+            if 0 <= py < self.depth_image.shape[0] and 0 <= px < self.depth_image.shape[1]:
+                edge_depth = self.depth_image[py, px]
+                depths.append(edge_depth)
+        
+        # Filtriramo neskončne vrednosti za analizo
+        finite_depths = [d for d in depths if not np.isinf(d) and d > 0]
+        
+        # Pravi obroč ima neskončno globino v sredini in končno na robovih
+        # Ali ima zelo malo končne globine (večina je neskončna)
+        infinite_count = sum(1 for d in depths if np.isinf(d))
+        
+        if infinite_count >= 2:  # Vsaj 2 neskončni odčitka = verjetno luknja
+            return True
+        
+        # Če so vse globine končne, preverimo varianco
+        if len(finite_depths) >= 3:
+            depth_array = np.array(finite_depths)
+            variance = np.var(depth_array)
+            std_dev = np.std(depth_array)
+            
+            # Pravi obroči imajo malo variance (vse točke so podobno oddaljene)
+            # Obrazi imajo malo variance (flat surface), toda so zelo blizu
+            # Zato preverimo tudi razdaljo - ring bi moral biti bolj oddaljen
+            mean_depth = np.mean(depth_array)
+            
+            # Če je srednja globina manjša od 0.8m in variance majhna, je verjetno obraz/flat surface
+            if mean_depth < 0.8 and std_dev < 0.3:
+                return False
+        
+        return np.isinf(center_depth)
+
+    def depth_callback(self, data):
+        try:
+            # Shranimo globinsko sliko kot 32-bitne float vrednosti (v metrih)
+            self.depth_image = self.bridge.imgmsg_to_cv2(data, "32FC1")
+        except CvBridgeError as e:
+            self.get_logger().error(f"Depth convert error: {e}")
 
     def image_callback(self, data):
+        # Če še nimamo globinske slike, ne moremo filtrirati kock
+        if self.depth_image is None:
+            return
+
         try:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         except CvBridgeError as e:
-            print(e)
+            self.get_logger().error(f"RGB convert error: {e}")
+            return
 
-        # Tranform image to grayscale
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-
-        # Binarize the image
         thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 30)
         cv2.imshow("Binary Image", thresh)
 
-        # Extract contours
-        contours, hierarchy = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Example of how to draw the contours, only for visualization purposes
-        cv2.drawContours(gray, contours, -1, (255, 0, 0), 1)
-        cv2.imshow("Detected contours", gray)
-
-        # Fit elipses to all extracted contours
         elps = []
         for cnt in contours:
             if cnt.shape[0] >= 20:
                 ellipse = cv2.fitEllipse(cnt)
-
-                # filter ellipses that are too eccentric
                 e = ellipse[1]
-                ecc1 = e[0]
-                ecc2 = e[1]
-
-                ratio = ecc1/ecc2 if ecc1>ecc2 else ecc2/ecc1
-                if ratio<=self.ratio_thr and ecc1<self.ecc_thr and ecc2<self.ecc_thr:
-
+                ratio = e[1]/e[0] if e[0] > 0 else 0
+                area = np.pi * e[0] * e[1] / 4  # Približna površina elipse
+                
+                if (ratio <= self.ratio_thr and e[0] < self.ecc_thr and e[1] < self.ecc_thr and
+                    self.min_area <= area <= self.max_area):
                     elps.append(ellipse)
 
-        # Find two elipses with same centers
-        candidates = []
-        for n in range(len(elps)):
-            e1 = elps[n]
+        for ellipse in elps:
+            # IMPLEMENTACIJA: Preverimo vsako elipso posamično
+            # 1. Dobimo koordinate središča (cx, cy)
+            cx, cy = int(ellipse[0][0]), int(ellipse[0][1])
 
-            # display candidates
-            cv2.ellipse(cv_image, e1, (255, 255, 0), 1)
-            cv2.circle(cv_image, (int(e1[0][0]), int(e1[0][1])), 1, (255, 255, 0), -1)
-
-            for m in range(n + 1, len(elps)):
-                # e[0] is the center of the ellipse (x,y), e[1] are the lengths of major and minor axis (major, minor), e[2] is the rotation in degrees
-                
-                e1 = elps[n]
-                e2 = elps[m]
-                dist = np.sqrt(((e1[0][0] - e2[0][0]) ** 2 + (e1[0][1] - e2[0][1]) ** 2))
-                angle_diff = np.abs(e1[2] - e2[2])
-
-                # The centers of the two elipses should be within 10 pixels of each other
-
-                if dist >= self.center_thr:
-                    continue
-
-                e1_minor_axis = e1[1][0]
-                e1_major_axis = e1[1][1]
-
-                e2_minor_axis = e2[1][0]
-                e2_major_axis = e2[1][1]
-
-                if e1_major_axis>=e2_major_axis and e1_minor_axis>=e2_minor_axis: # the larger ellipse should have both axis larger
-                    le = e1 # e1 is larger ellipse
-                    se = e2 # e2 is smaller ellipse
-                elif e2_major_axis>=e1_major_axis and e2_minor_axis>=e1_minor_axis:
-                    le = e2 # e2 is larger ellipse
-                    se = e1 # e1 is smaller ellipse
+            # 2. Preverimo, če so koordinate znotraj slike
+            if 0 <= cy < self.depth_image.shape[0] and 0 <= cx < self.depth_image.shape[1]:
+                # 3. Preverimo varianco globine (ali je to resničen obroč ali kaj drugega)
+                if self.check_ring_variance(ellipse):
+                    # To je lebdeči obroč
+                    mid_depth = self.depth_image[cy, cx]
+                    self.get_logger().info(f"Najden lebdeči obroč! Globina v sredini: {mid_depth:.2f}m")
+                    cv2.ellipse(cv_image, ellipse, (0, 255, 0), 3) # Zelena barva za lebdečega
+                    # Objavimo marker, da ga vidiš v RViz
+                    self.publish_ring_marker(ellipse, mid_depth if not np.isinf(mid_depth) else 2.0)
                 else:
-                    continue # if one ellipse does not contain the other, it is not a ring
-                    
-                candidates.append((e1,e2))
-
-        print("Processing is done! found", len(candidates), "candidates for rings")
-
-        # Plot the rings on the image
-        for c in candidates:
-
-            # the centers of the ellipses
-            e1 = c[0]
-            e2 = c[1]
-
-            # drawing the ellipses on the image
-            cv2.ellipse(cv_image, e1, (0, 255, 0), 2)
-            cv2.ellipse(cv_image, e2, (0, 255, 0), 2)
-
-            # Get a bounding box, around the first ellipse ('average' of both elipsis)
-            size = (e1[1][0]+e1[1][1])/2
-            center = (e1[0][1], e1[0][0])
-
-            x1 = int(center[0] - size / 2)
-            x2 = int(center[0] + size / 2)
-            x_min = x1 if x1>0 else 0
-            x_max = x2 if x2<cv_image.shape[0] else cv_image.shape[0]
-
-            y1 = int(center[1] - size / 2)
-            y2 = int(center[1] + size / 2)
-            y_min = y1 if y1 > 0 else 0
-            y_max = y2 if y2 < cv_image.shape[1] else cv_image.shape[1]
+                    # To je obroč na kocki, obraz ali lažni pozitiv
+                    # self.get_logger().info(f"Ignoriram. Ni pravi obroč")
+                    cv2.ellipse(cv_image, ellipse, (0, 0, 255), 1) # Rdeča tanjša črta za ignoriranega
 
         cv2.imshow("Detected rings", cv_image)
         cv2.waitKey(1)
 
-    def depth_callback(self,data):
-
-        try:
-            depth_image = self.bridge.imgmsg_to_cv2(data, "32FC1")
-        except CvBridgeError as e:
-            print(e)
-
-        depth_image[depth_image==np.inf] = 0
+    def publish_ring_marker(self, ellipse, depth):
+        # Ustvarimo marker za RViz
+        marker = Marker()
+        # Nastavimo frame na kamero, ker so koordinate iz globinske slike
+        marker.header.frame_id = "oakd_rgb_camera_optical_frame" 
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.type = Marker.SPHERE
+        marker.id = 0
+        marker.scale.x = 0.2
+        marker.scale.y = 0.2
+        marker.scale.z = 0.2
+        # Marker bo RDEČ, da ga ločiš od zelenih obrazov
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
         
-        # Do the necessairy conversion so we can visuzalize it in OpenCV
-        image_1 = depth_image / 65536.0 * 255
-        image_1 = image_1/np.max(image_1)*255
-
-        image_viz = np.array(image_1, dtype= np.uint8)
-
-        cv2.imshow("Depth window", image_viz)
-        cv2.waitKey(1)
-
+        # Položaj: z je globina, x in y bi morala izračunati iz pikslov, 
+        # a za test damo približno na sredino
+        marker.pose.position.x = 0.0 
+        marker.pose.position.y = 0.0
+        marker.pose.position.z = float(depth)
+        
+        self.marker_pub.publish(marker)
 
 def main():
-
     rclpy.init(args=None)
-    rd_node = RingDetector()
-
-    rclpy.spin(rd_node)
-
+    node = RingDetector()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
     cv2.destroyAllWindows()
-
 
 if __name__ == '__main__':
     main()
