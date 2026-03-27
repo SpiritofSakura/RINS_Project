@@ -1,204 +1,330 @@
 #!/usr/bin/python3
+"""
+Ring detector for small (~20 cm) coloured rings dangling from stands.
+
+Strategy:
+  1. Segment by colour in HSV (red, green, blue, yellow — extend as needed)
+  2. Find contours in each colour mask
+  3. Fit ellipse and check shape (small rings viewed at angles → ellipses)
+  4. Verify with depth: centre must be hollow (sky/nothing), rim must be solid
+  5. Publish marker with colour embedded, plus a /ring_colour String topic
+
+Why colour-first beats edge-first for this scene:
+  - Rings are strongly saturated solid colours
+  - Background (sky, wooden boxes, grey floor) has very different hue
+  - Colour segmentation kills false positives immediately
+  - We get the ring colour for free (needed later for speech)
+"""
 
 import rclpy
 from rclpy.node import Node
-import cv2, math
+import cv2
 import numpy as np
-import tf2_ros
-
-from sensor_msgs.msg import Image
-from geometry_msgs.msg import PointStamped, Vector3, Pose
+from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs_py import point_cloud2 as pc2
 from cv_bridge import CvBridge, CvBridgeError
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
-
-# Uvozimo potrebne QoS nastavitve
+from visualization_msgs.msg import Marker
+from std_msgs.msg import String
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+
+# ── QoS ───────────────────────────────────────────────────────────────────────
+SENSOR_QOS = QoSProfile(
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=1,
+)
+
+# ── Colour HSV ranges ─────────────────────────────────────────────────────────
+# Red wraps around 180° so it needs two ranges.
+# Tune S/V minimums if the simulator renders rings darker or more washed-out.
+COLOUR_RANGES = {
+    "red": [
+        (np.array([0,   130,  60]), np.array([10,  255, 255])),
+        (np.array([168, 130,  60]), np.array([180, 255, 255])),
+    ],
+    "green": [
+        (np.array([40,  80,  50]), np.array([90, 255, 255])),
+    ],
+    "blue": [
+        (np.array([100, 80,  50]), np.array([140, 255, 255])),
+    ],
+    "yellow": [
+        (np.array([20,  100, 100]), np.array([35, 255, 255])),
+    ],
+    "orange": [
+        (np.array([10,  150,  80]), np.array([20, 255, 255])),
+    ],
+}
+
+# RViz marker colours (r, g, b) per ring colour
+MARKER_COLOURS = {
+    "red":    (1.0, 0.0, 0.0),
+    "green":  (0.0, 1.0, 0.0),
+    "blue":   (0.0, 0.4, 1.0),
+    "yellow": (1.0, 1.0, 0.0),
+    "orange": (1.0, 0.5, 0.0),
+}
+
+# ── Shape filter tuning ───────────────────────────────────────────────────────
+MIN_CONTOUR_PTS  = 15       # need this many points to fit an ellipse
+MIN_AREA_PX2     = 200      # px² — a 20 cm ring at ~3 m is still >200 px²
+MAX_AREA_PX2     = 50_000   # upper sanity bound
+MIN_ASPECT       = 0.28     # minor/major — allows ~75° viewing angle
+MIN_CIRCULARITY  = 0.15     # relaxed for perspective + small size
+MAX_CIRCULARITY  = 1.40
+
+# ── Depth verification ────────────────────────────────────────────────────────
+MAX_RANGE_M      = 7.0      # beyond this → "nothing" / sky
+RIM_SOLID_FRAC   = 0.35     # fraction of 12 rim samples that must be solid
+                             # (low because the stand can occlude some samples)
+
 
 class RingDetector(Node):
     def __init__(self):
-        super().__init__('ring_detector') # Popravljeno ime vozlišča
+        super().__init__('ring_detector')
+        self.bridge    = CvBridge()
+        self.depth_raw = None
 
-        # Pragovi za elipse - dodani omejitve velikosti
-        self.ecc_thr = 300 
-        self.ratio_thr = 1.5  # Razumna razmerja za krožne oblike
-        self.center_thr = 10
-        self.min_area = 200  # Minimalna površina elipse (približno)
-        self.max_area = 15000  # Maksimalna površina elipse
-        self.depth_threshold = 1.5  # Globina za detekcijo lebdečega obroča
+        # Rings confirmed in the current frame — list of dicts
+        self.confirmed_rings = []
 
-        # Most za pretvorbo slik
-        self.bridge = CvBridge()
-        self.depth_image = None
+        # Subscriptions
+        self.image_sub = self.create_subscription(
+            Image, "/oakd/rgb/preview/image_raw", self.image_callback, SENSOR_QOS)
+        self.depth_sub = self.create_subscription(
+            Image, "/oakd/rgb/preview/depth", self.depth_callback, SENSOR_QOS)
+        self.pointcloud_sub = self.create_subscription(
+            PointCloud2, "/oakd/rgb/preview/depth/points",
+            self.pointcloud_callback, SENSOR_QOS)
 
-        # Nastavimo QoS na BEST_EFFORT, da se ujema s simulatorjem (globina)
-        depth_qos = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        # Naročnine - uporabimo privzeto QoS (10) za RGB, ker je bolj zanesljivo
-        self.image_sub = self.create_subscription(Image, "/oakd/rgb/preview/image_raw", self.image_callback, 10)
-        # Za globino pa nujno BEST_EFFORT
-        self.depth_sub = self.create_subscription(Image, "/oakd/rgb/preview/depth", self.depth_callback, depth_qos)
-
-        # Dodamo Publisher za markerje obročev, da jih vidiš v RViz
+        # Publishers
         self.marker_pub = self.create_publisher(Marker, "/ring_marker", 10)
+        self.colour_pub = self.create_publisher(String, "/ring_colour", 10)
 
-        # Okna za vizualizacijo
-        cv2.namedWindow("Binary Image", cv2.WINDOW_NORMAL)
+        # Debug windows
+        cv2.namedWindow("Colour masks",  cv2.WINDOW_NORMAL)
         cv2.namedWindow("Detected rings", cv2.WINDOW_NORMAL)
-        
-        self.get_logger().info("Detektor obročev (z globino) zagnan!")
+        cv2.namedWindow("Depth window",   cv2.WINDOW_NORMAL)
 
-    def check_ring_variance(self, ellipse):
-        """Preverimo varianco globine - pravi obroči imajo visoko varianco (luknja v sredini)"""
-        cx, cy = int(ellipse[0][0]), int(ellipse[0][1])
-        a, b = ellipse[1][0] / 2, ellipse[1][1] / 2
-        
-        # Preverimo če so koordinate veljalne
-        if not (0 <= cy < self.depth_image.shape[0] and 0 <= cx < self.depth_image.shape[1]):
-            return False
-        
-        # Preberemo globine na različnih točkah
-        depths = []
-        
-        # Globina v sredini
-        center_depth = self.depth_image[cy, cx]
-        depths.append(center_depth)
-        
-        # Globine na robovih elipse (4 točke)
-        for angle in [0, 90, 180, 270]:
-            rad = np.radians(angle)
-            px = int(cx + a * np.cos(rad))
-            py = int(cy + b * np.sin(rad))
-            
-            if 0 <= py < self.depth_image.shape[0] and 0 <= px < self.depth_image.shape[1]:
-                edge_depth = self.depth_image[py, px]
-                depths.append(edge_depth)
-        
-        # Filtriramo neskončne vrednosti za analizo
-        finite_depths = [d for d in depths if not np.isinf(d) and d > 0]
-        
-        # Pravi obroč ima neskončno globino v sredini in končno na robovih
-        # Ali ima zelo malo končne globine (večina je neskončna)
-        infinite_count = sum(1 for d in depths if np.isinf(d))
-        
-        if infinite_count >= 2:  # Vsaj 2 neskončni odčitka = verjetno luknja
-            return True
-        
-        # Če so vse globine končne, preverimo varianco
-        if len(finite_depths) >= 3:
-            depth_array = np.array(finite_depths)
-            variance = np.var(depth_array)
-            std_dev = np.std(depth_array)
-            
-            # Pravi obroči imajo malo variance (vse točke so podobno oddaljene)
-            # Obrazi imajo malo variance (flat surface), toda so zelo blizu
-            # Zato preverimo tudi razdaljo - ring bi moral biti bolj oddaljen
-            mean_depth = np.mean(depth_array)
-            
-            # Če je srednja globina manjša od 0.8m in variance majhna, je verjetno obraz/flat surface
-            if mean_depth < 0.8 and std_dev < 0.3:
-                return False
-        
-        return np.isinf(center_depth)
+        self.get_logger().info("RingDetector ready (colour-first mode).")
 
-    def depth_callback(self, data):
-        try:
-            # Shranimo globinsko sliko kot 32-bitne float vrednosti (v metrih)
-            self.depth_image = self.bridge.imgmsg_to_cv2(data, "32FC1")
-        except CvBridgeError as e:
-            self.get_logger().error(f"Depth convert error: {e}")
-
+    # ── Main image callback ───────────────────────────────────────────────────
     def image_callback(self, data):
-        # Če še nimamo globinske slike, ne moremo filtrirati kock
-        if self.depth_image is None:
-            return
-
         try:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
-        except CvBridgeError as e:
-            self.get_logger().error(f"RGB convert error: {e}")
+        except CvBridgeError:
             return
 
-        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 30)
-        cv2.imshow("Binary Image", thresh)
+        if self.depth_raw is None:
+            return
 
-        contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
 
-        elps = []
-        for cnt in contours:
-            if cnt.shape[0] >= 20:
-                ellipse = cv2.fitEllipse(cnt)
-                e = ellipse[1]
-                ratio = e[1]/e[0] if e[0] > 0 else 0
-                area = np.pi * e[0] * e[1] / 4  # Približna površina elipse
-                
-                if (ratio <= self.ratio_thr and e[0] < self.ecc_thr and e[1] < self.ecc_thr and
-                    self.min_area <= area <= self.max_area):
-                    elps.append(ellipse)
+        self.confirmed_rings = []
+        combined_mask = np.zeros(cv_image.shape[:2], dtype=np.uint8)
 
-        for ellipse in elps:
-            # IMPLEMENTACIJA: Preverimo vsako elipso posamično
-            # 1. Dobimo koordinate središča (cx, cy)
-            cx, cy = int(ellipse[0][0]), int(ellipse[0][1])
+        for colour_name, ranges in COLOUR_RANGES.items():
+            # Build colour mask
+            mask = np.zeros(cv_image.shape[:2], dtype=np.uint8)
+            for lo, hi in ranges:
+                mask |= cv2.inRange(hsv, lo, hi)
 
-            # 2. Preverimo, če so koordinate znotraj slike
-            if 0 <= cy < self.depth_image.shape[0] and 0 <= cx < self.depth_image.shape[1]:
-                # 3. Preverimo varianco globine (ali je to resničen obroč ali kaj drugega)
-                if self.check_ring_variance(ellipse):
-                    # To je lebdeči obroč
-                    mid_depth = self.depth_image[cy, cx]
-                    self.get_logger().info(f"Najden lebdeči obroč! Globina v sredini: {mid_depth:.2f}m")
-                    cv2.ellipse(cv_image, ellipse, (0, 255, 0), 3) # Zelena barva za lebdečega
-                    # Objavimo marker, da ga vidiš v RViz
-                    self.publish_ring_marker(ellipse, mid_depth if not np.isinf(mid_depth) else 2.0)
-                else:
-                    # To je obroč na kocki, obraz ali lažni pozitiv
-                    # self.get_logger().info(f"Ignoriram. Ni pravi obroč")
-                    cv2.ellipse(cv_image, ellipse, (0, 0, 255), 1) # Rdeča tanjša črta za ignoriranega
+            # Remove speckle noise, then close small gaps in the ring outline
+            mask = cv2.morphologyEx(
+                mask, cv2.MORPH_OPEN,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+            mask = cv2.morphologyEx(
+                mask, cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
 
+            combined_mask |= mask
+
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for cnt in contours:
+                ring = self._evaluate_contour(cnt, colour_name)
+                if ring is None:
+                    continue
+
+                self.confirmed_rings.append(ring)
+                self._draw_ring(cv_image, ring)
+            if self.confirmed_rings:
+                self.get_logger().info(f"RING IN VIEW: {[r['colour'] for r in self.confirmed_rings]}")
+
+        # Show combined colour mask for debugging
+        cv2.imshow("Colour masks",
+                   cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR))
         cv2.imshow("Detected rings", cv_image)
         cv2.waitKey(1)
 
-    def publish_ring_marker(self, ellipse, depth):
-        # Ustvarimo marker za RViz
-        marker = Marker()
-        # Nastavimo frame na kamero, ker so koordinate iz globinske slike
-        marker.header.frame_id = "oakd_rgb_camera_optical_frame" 
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.type = Marker.SPHERE
-        marker.id = 0
-        marker.scale.x = 0.2
-        marker.scale.y = 0.2
-        marker.scale.z = 0.2
-        # Marker bo RDEČ, da ga ločiš od zelenih obrazov
-        marker.color.r = 1.0
-        marker.color.g = 0.0
-        marker.color.b = 0.0
-        marker.color.a = 1.0
-        
-        # Položaj: z je globina, x in y bi morala izračunati iz pikslov, 
-        # a za test damo približno na sredino
-        marker.pose.position.x = 0.0 
-        marker.pose.position.y = 0.0
-        marker.pose.position.z = float(depth)
-        
-        self.marker_pub.publish(marker)
+    # ── Contour → ring dict (or None) ─────────────────────────────────────────
+    def _evaluate_contour(self, cnt, colour_name):
+        if len(cnt) < MIN_CONTOUR_PTS:
+            return None
 
+        area = cv2.contourArea(cnt)
+        if not (MIN_AREA_PX2 < area < MAX_AREA_PX2):
+            self.get_logger().debug(f"[{colour_name}] area fail: {area:.0f}")
+            return None
+
+        try:
+            ellipse = cv2.fitEllipse(cnt)
+        except cv2.error:
+            return None
+
+        (ex, ey), (minor_d, major_d), angle = ellipse
+        if major_d == 0:
+            return None
+
+        # Aspect ratio filter
+        aspect = minor_d / major_d
+        if aspect < MIN_ASPECT:
+            self.get_logger().debug(f"[{colour_name}] aspect fail: {aspect:.2f}")
+            return None
+
+        # Circularity relative to fitted ellipse area (more stable than hull)
+        ellipse_area = np.pi * (minor_d / 2) * (major_d / 2)
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0:
+            return None
+        circularity = (4 * np.pi * ellipse_area) / (perimeter ** 2)
+        if not (MIN_CIRCULARITY < circularity < MAX_CIRCULARITY):
+            self.get_logger().debug(f"[{colour_name}] circularity fail: {circularity:.2f}")
+            return None
+
+        cx, cy   = int(ex), int(ey)
+        semi_px  = int(major_d / 2)
+
+        if not self._depth_is_ring(cx, cy, semi_px):
+            self.get_logger().debug(f"[{colour_name}] depth fail at ({cx},{cy}) semi={semi_px}")
+            return None
+
+        return {
+            "cx": cx, "cy": cy,
+            "semi_major_px": semi_px,
+            "ellipse": ellipse,
+            "colour": colour_name,
+        }
+
+    # ── Depth verification ────────────────────────────────────────────────────
+    def _depth_is_ring(self, cx, cy, semi_px):
+        h, w = self.depth_raw.shape
+        # Only reject if the ring centre itself is out of bounds
+        if not (0 <= cx < w and 0 <= cy < h):
+            return False
+
+        # Centre must be hollow: sample a small patch and take the median
+        half = max(2, semi_px // 6)
+        patch = self.depth_raw[cy - half: cy + half + 1,
+                               cx - half: cx + half + 1].ravel()
+        valid_centre = patch[np.isfinite(patch) & (patch > 0)]
+        if len(valid_centre) > 0 and float(np.median(valid_centre)) < MAX_RANGE_M:
+            return False  # solid surface at centre → not a ring
+
+        # Rim: 12 evenly spaced samples around the ellipse
+        solid = sum(
+            1 for k in range(12)
+            for rx, ry in [(
+                int(cx + semi_px * np.cos(2 * np.pi * k / 12)),
+                int(cy + semi_px * np.sin(2 * np.pi * k / 12)),
+            )]
+            if 0 <= ry < h and 0 <= rx < w
+            and np.isfinite(self.depth_raw[ry, rx])
+            and 0 < self.depth_raw[ry, rx] < MAX_RANGE_M
+        )
+
+        return (solid / 12) >= RIM_SOLID_FRAC
+
+    # ── Depth callback ────────────────────────────────────────────────────────
+    def depth_callback(self, data):
+        try:
+            self.depth_raw = self.bridge.imgmsg_to_cv2(data, "32FC1")
+        except CvBridgeError:
+            return
+
+        d = self.depth_raw.copy()
+        d[~np.isfinite(d)] = 0
+        cv2.normalize(d, d, 0, 255, cv2.NORM_MINMAX)
+        viz = cv2.cvtColor(np.uint8(d), cv2.COLOR_GRAY2BGR)
+
+        for ring in self.confirmed_rings:
+            cv2.circle(viz, (ring["cx"], ring["cy"]),
+                       ring["semi_major_px"], (0, 255, 0), 2)
+
+        cv2.imshow("Depth window", viz)
+        cv2.waitKey(1)
+
+    # ── Point cloud callback ──────────────────────────────────────────────────
+    def pointcloud_callback(self, data):
+        if not self.confirmed_rings:
+            return
+
+        try:
+            pts = pc2.read_points_numpy(data, field_names=("x", "y", "z"))
+            pts = pts.reshape((data.height, data.width, 3))
+
+            for i, ring in enumerate(self.confirmed_rings):
+                cx, cy, semi_px = ring["cx"], ring["cy"], ring["semi_major_px"]
+                colour = ring["colour"]
+
+                # Use rim point to the right (least likely to be occluded by stand)
+                rx = min(cx + semi_px, data.width - 1)
+                ry = min(cy, data.height - 1)
+                p  = pts[ry, rx, :]
+
+                if np.isnan(p).any() or np.isinf(p).any():
+                    continue
+
+                # Marker
+                marker = Marker()
+                marker.header.frame_id = "base_link"
+                marker.header.stamp    = data.header.stamp
+                marker.type            = Marker.CYLINDER
+                marker.id              = i
+                marker.scale.x = marker.scale.y = marker.scale.z = 0.1
+
+                r, g, b = MARKER_COLOURS.get(colour, (1.0, 1.0, 1.0))
+                marker.color.r, marker.color.g, marker.color.b = r, g, b
+                marker.color.a = 1.0
+
+                marker.pose.position.x = float(p[0])
+                marker.pose.position.y = float(p[1])
+                marker.pose.position.z = float(p[2])
+                marker.pose.orientation.w = 1.0
+
+                self.marker_pub.publish(marker)
+
+                # Publish colour string for the localizator
+                self.colour_pub.publish(String(data=colour))
+
+        except Exception as e:
+            self.get_logger().error(f"pointcloud_callback: {e}")
+
+    # ── Draw helper ───────────────────────────────────────────────────────────
+    def _draw_ring(self, img, ring):
+        bgr = {
+            "red": (0, 0, 220), "green": (0, 200, 0), "blue": (220, 80, 0),
+            "yellow": (0, 220, 220), "orange": (0, 140, 255),
+        }.get(ring["colour"], (200, 200, 200))
+
+        cv2.ellipse(img, ring["ellipse"], bgr, 2)
+        cv2.circle(img, (ring["cx"], ring["cy"]), 4, (255, 255, 255), -1)
+        cv2.putText(img, ring["colour"],
+                    (ring["cx"] - 20, ring["cy"] - ring["semi_major_px"] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, bgr, 1)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 def main():
-    rclpy.init(args=None)
+    rclpy.init()
     node = RingDetector()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
     cv2.destroyAllWindows()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
