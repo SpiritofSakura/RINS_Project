@@ -62,7 +62,7 @@ class detect_faces(Node):
 		try:
 			cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
 
-			self.get_logger().info(f"Running inference on image...")
+			#self.get_logger().info(f"Running inference on image...")
 
 			# run inference
 			res = self.model.predict(cv_image, imgsz=(256, 320), show=False, verbose=False, classes=[0], device=self.device)
