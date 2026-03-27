@@ -73,6 +73,11 @@ MIN_ASPECT       = 0.28     # minor/major — allows ~75° viewing angle
 MIN_CIRCULARITY  = 0.15     # relaxed for perspective + small size
 MAX_CIRCULARITY  = 1.40
 
+# ── Cross-frame confirmation ──────────────────────────────────────────────────
+CONFIRM_HITS     = 8    # frames a ring must be seen before it's "confirmed"
+MAX_MISSED       = 10   # frames without a match before dropping a candidate
+MATCH_DIST_PX    = 40   # pixel radius to match a detection to an existing candidate
+
 # ── Depth verification ────────────────────────────────────────────────────────
 MAX_RANGE_M      = 7.0      # beyond this → "nothing" / sky
 RIM_SOLID_FRAC   = 0.35     # fraction of 12 rim samples that must be solid
@@ -87,6 +92,9 @@ class RingDetector(Node):
 
         # Rings confirmed in the current frame — list of dicts
         self.confirmed_rings = []
+
+        # Cross-frame accumulator: list of {colour, cx, cy, hits, missed}
+        self._candidates = []
 
         # Subscriptions
         self.image_sub = self.create_subscription(
@@ -120,8 +128,8 @@ class RingDetector(Node):
 
         hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
 
-        self.confirmed_rings = []
         combined_mask = np.zeros(cv_image.shape[:2], dtype=np.uint8)
+        frame_detections = []  # raw detections this frame
 
         for colour_name, ranges in COLOUR_RANGES.items():
             # Build colour mask
@@ -144,13 +152,46 @@ class RingDetector(Node):
 
             for cnt in contours:
                 ring = self._evaluate_contour(cnt, colour_name)
-                if ring is None:
-                    continue
+                if ring is not None:
+                    frame_detections.append(ring)
 
-                self.confirmed_rings.append(ring)
-                self._draw_ring(cv_image, ring)
-            if self.confirmed_rings:
-                self.get_logger().info(f"RING IN VIEW: {[r['colour'] for r in self.confirmed_rings]}")
+        # ── Update cross-frame candidates ────────────────────────────────────
+        matched = set()
+        for det in frame_detections:
+            best_idx, best_dist = None, MATCH_DIST_PX
+            for i, cand in enumerate(self._candidates):
+                if cand["colour"] != det["colour"]:
+                    continue
+                dist = np.hypot(cand["cx"] - det["cx"], cand["cy"] - det["cy"])
+                if dist < best_dist:
+                    best_dist, best_idx = dist, i
+            if best_idx is not None:
+                self._candidates[best_idx]["hits"] += 1
+                self._candidates[best_idx]["missed"] = 0
+                self._candidates[best_idx]["cx"] = det["cx"]
+                self._candidates[best_idx]["cy"] = det["cy"]
+                self._candidates[best_idx]["ring"] = det
+                matched.add(best_idx)
+            else:
+                self._candidates.append(
+                    {"colour": det["colour"], "cx": det["cx"], "cy": det["cy"],
+                     "hits": 1, "missed": 0, "ring": det})
+
+        # Increment missed counter for unmatched candidates, prune stale ones
+        for i in range(len(self._candidates) - 1, -1, -1):
+            if i not in matched:
+                self._candidates[i]["missed"] += 1
+            if self._candidates[i]["missed"] > MAX_MISSED:
+                self._candidates.pop(i)
+
+        # Only draw/report candidates that have enough hits
+        self.confirmed_rings = [
+            c["ring"] for c in self._candidates if c["hits"] >= CONFIRM_HITS
+        ]
+        for ring in self.confirmed_rings:
+            self._draw_ring(cv_image, ring)
+        if self.confirmed_rings:
+            self.get_logger().info(f"RING IN VIEW: {[r['colour'] for r in self.confirmed_rings]}")
 
         # Show combined colour mask for debugging
         cv2.imshow("Colour masks",
