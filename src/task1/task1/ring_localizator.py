@@ -3,13 +3,6 @@
 Ring localizator — accumulates per-frame detections, clusters them in map
 frame, and publishes a persistent coloured marker once a location is confirmed.
 
-Changes from previous version:
-  - Stores colour per cluster (majority vote across detections)
-  - Subscribes to /ring_colour String topic to pair colour with position
-  - Online clustering: O(rings) per detection, not O(all detections)
-  - Incremental centroid averaging
-  - Bounded memory (MAX_RAW_PTS cap)
-  - Tighter cluster radius (0.5 m) to separate nearby rings
 """
 
 import rclpy
@@ -76,6 +69,7 @@ MARKER_COLOURS = {
     "blue":   (0.0, 0.4, 1.0),
     "yellow": (1.0, 1.0, 0.0),
     "orange": (1.0, 0.5, 0.0),
+    "black":  (0.1, 0.1, 0.1),
 }
 
 

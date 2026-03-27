@@ -54,6 +54,9 @@ COLOUR_RANGES = {
     "orange": [
         (np.array([10,  150,  80]), np.array([20, 255, 255])),
     ],
+    "black": [
+        (np.array([0, 0, 0]), np.array([180, 255, 50])),
+    ],
 }
 
 # RViz marker colours (r, g, b) per ring colour
@@ -63,6 +66,7 @@ MARKER_COLOURS = {
     "blue":   (0.0, 0.4, 1.0),
     "yellow": (1.0, 1.0, 0.0),
     "orange": (1.0, 0.5, 0.0),
+    "black":  (0.1, 0.1, 0.1),
 }
 
 # ── Shape filter tuning ───────────────────────────────────────────────────────
@@ -346,7 +350,7 @@ class RingDetector(Node):
     def _draw_ring(self, img, ring):
         bgr = {
             "red": (0, 0, 220), "green": (0, 200, 0), "blue": (220, 80, 0),
-            "yellow": (0, 220, 220), "orange": (0, 140, 255),
+            "yellow": (0, 220, 220), "orange": (0, 140, 255), "black": (50, 50, 50),
         }.get(ring["colour"], (200, 200, 200))
 
         cv2.ellipse(img, ring["ellipse"], bgr, 2)
