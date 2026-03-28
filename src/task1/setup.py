@@ -27,6 +27,8 @@ setup(
             'waypoint_navigator = task1.waypoint_navigator:main',
             'face_localizator = task1.face_localizator:main',
             'path_listener = task1.path_listener:main',
+            'ring_localizator = task1.ring_localizator:main',
+            'robot_state_overlay = task1.robot_state_overlay:main',
         ],
     },
 )

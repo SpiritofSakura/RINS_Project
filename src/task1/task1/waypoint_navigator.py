@@ -11,6 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
+from std_msgs.msg import String
 
 
 def yaw_v_kvaternion(kot):
@@ -24,15 +25,25 @@ class WaypointNavigator(Node):
     def __init__(self):
         super().__init__('waypoint_navigator')
 
+
         self.akcijski_odjemalec = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.seznam_tock = self.nalozi_tocke()
         self.indeks_tocke = 0
         self.rezultat_prihodnost = None
         self.zacetek = False
 
+        self.pub_stanje = self.create_publisher(String, '/robot_state', 10)
+
         self.casovnik = self.create_timer(0.5, self.zanka)
 
         self.get_logger().info(f'Nalozenih waypointov: {len(self.seznam_tock)}')
+
+
+    def objavi_stanje(self, stanje):
+        msg = String()
+        msg.data = stanje
+        self.pub_stanje.publish(msg)
+
 
     def nalozi_tocke(self):
         pot_paketa = get_package_share_directory('task1')
