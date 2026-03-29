@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'waypoint_navigator = task1.waypoint_navigator:main',
+            'simple_waypoints_nav = task1.simple_waypoints_nav:main',
             'face_localizator = task1.face_localizator:main',
             'path_listener = task1.path_listener:main',
             'ring_localizator = task1.ring_localizator:main',
