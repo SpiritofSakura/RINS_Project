@@ -39,6 +39,13 @@ def generate_launch_description():
         output='screen',
     )
 
+
+    behavior_manager_node = Node(
+        package='task1',
+        executable='behavior_manager',
+        name='behavior_manager',
+        output='screen',
+    )
     waypoint_navigator_node = Node(
         package='task1',
         executable='waypoint_navigator',
@@ -70,6 +77,7 @@ def generate_launch_description():
         detect_rings_node,
         face_localizator_node,
         robot_state_overlay_node,
+        behavior_manager_node,
         delayed_waypoint_navigator,
         delayed_ring_localizator,
     ])

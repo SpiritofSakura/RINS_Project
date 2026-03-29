@@ -29,6 +29,7 @@ setup(
             'path_listener = task1.path_listener:main',
             'ring_localizator = task1.ring_localizator:main',
             'robot_state_overlay = task1.robot_state_overlay:main',
+            'behavior_manager = task1.behavior_manager:main',
         ],
     },
 )
