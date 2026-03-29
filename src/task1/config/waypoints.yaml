@@ -29,6 +29,8 @@ waypoints:
   y: 2.2
   yaw: -0.8
 
+## possibly need one more here to look at right wall
+
 #7
 - x: -1.2
   y: 2.5

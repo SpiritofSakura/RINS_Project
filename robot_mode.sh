@@ -3,7 +3,7 @@
 set -e
 
 source /opt/ros/jazzy/setup.bash
-source ~/ROS/project/RINS_Project/install/setup.bash
+# source ~/ROS/project/RINS_Project/install/setup.bash
 
 ukaz="$1"
 
