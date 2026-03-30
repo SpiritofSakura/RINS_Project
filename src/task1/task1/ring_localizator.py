@@ -72,6 +72,13 @@ MARKER_COLOURS = {
     "black":  (0.1, 0.1, 0.1),
 }
 
+def _rgb_to_colour_name(r, g, b, tolerance=0.15):
+    """Reverse-lookup colour name from RGB marker values."""
+    for colour, (cr, cg, cb) in MARKER_COLOURS.items():
+        if abs(r - cr) < tolerance and abs(g - cg) < tolerance and abs(b - cb) < tolerance:
+            return colour
+    return "unknown"
+
 
 class RingLocalizator(Node):
     def __init__(self):
@@ -94,10 +101,6 @@ class RingLocalizator(Node):
 
         self.clusters: list[Cluster] = []
         self.marker_id_counter = 0
-        self.confirmed_markers = {}  # Store confirmed rings to republish: {id: (x, y, z, colour)}
-
-        # Timer to republish confirmed rings every 100ms so behavior_manager keeps receiving them
-        self.create_timer(0.1, self._republish_confirmed_rings)
 
         self.get_logger().info(
             f"RingLocalizator ready — "
@@ -125,7 +128,8 @@ class RingLocalizator(Node):
             self.get_logger().error(f"marker_callback: {e}")
             return
 
-        colour = self._latest_colour
+        # Extract colour from marker's RGB values
+        colour = _rgb_to_colour_name(marker_msg.color.r, marker_msg.color.g, marker_msg.color.b)
 
         # Find nearest cluster
         best, best_d = None, float('inf')
@@ -156,15 +160,7 @@ class RingLocalizator(Node):
 
         cluster.confirmed = True
         colour = cluster.best_colour
-        
-        # Store the confirmed marker for republishing
-        marker_id = self.marker_id_counter
-        self.marker_id_counter += 1
-        self.confirmed_markers[marker_id] = (cx, cy, cz, colour)
-        
-        # Publish immediately
-        self._publish_marker(cx, cy, cz, colour, marker_id)
-        
+        self._publish_marker(cx, cy, cz, colour)
         self.get_logger().info(
             f"Ring confirmed: colour={colour}  "
             f"pos=({cx:.2f}, {cy:.2f})  "
@@ -173,25 +169,15 @@ class RingLocalizator(Node):
         )
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _republish_confirmed_rings(self):
-        """Continuously republish all confirmed rings."""
-        for marker_id, (x, y, z, colour) in self.confirmed_markers.items():
-            self._publish_marker(x, y, z, colour, marker_id)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    def _publish_marker(self, x, y, z, colour, marker_id=None):
+    def _publish_marker(self, x, y, z, colour):
         r, g, b = MARKER_COLOURS.get(colour, (1.0, 1.0, 1.0))
 
         marker = Marker()
         marker.header.frame_id = "map"
         marker.header.stamp    = self.get_clock().now().to_msg()
         marker.type            = Marker.CYLINDER
-        
-        # Use provided marker_id or generate new one
-        if marker_id is None:
-            marker_id = self.marker_id_counter
-            self.marker_id_counter += 1
-        marker.id = marker_id
+        marker.id              = self.marker_id_counter
+        self.marker_id_counter += 1
 
         marker.pose.position.x = x
         marker.pose.position.y = y
@@ -203,7 +189,8 @@ class RingLocalizator(Node):
 
         marker.color.r, marker.color.g, marker.color.b = r, g, b
         marker.color.a = 1.0
-
+        # No lifetime - confirmed rings persist permanently
+        
         self.ring_locations_pub.publish(marker)
 
     # ──────────────────────────────────────────────────────────────────────────

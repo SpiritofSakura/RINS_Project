@@ -31,6 +31,7 @@ setup(
             'ring_localizator = task1.ring_localizator:main',
             'robot_state_overlay = task1.robot_state_overlay:main',
             'behavior_manager = task1.behavior_manager:main',
+            'detect_rings_v2 = task1.detect_rings_v2:main',
         ],
     },
 )

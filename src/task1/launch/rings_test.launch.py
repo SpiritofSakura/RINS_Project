@@ -3,13 +3,13 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    """Launch the rings test with ring_localizator, detect_rings, and simple waypoint navigator."""
+    """Launch the rings test with ring_localizator, detect_rings_v2, and simple waypoint navigator."""
     
-    # Ring detection node from dis_tutorial5 package
+    # Ring detection node v2 (Hough circle-based) from task1 package
     detect_rings_node = Node(
-        package='dis_tutorial5',
-        executable='detect_rings.py',
-        name='detect_rings',
+        package='task1',
+        executable='detect_rings_v2',
+        name='detect_rings_v2',
         output='screen',
     )
 
@@ -22,19 +22,18 @@ def generate_launch_description():
     )
 
     # Simple waypoint navigator node from task1 package
-    # (has 10 second delay built-in before navigation starts)
-    simple_waypoints_nav_node = Node(
-        package='task1',
-        executable='simple_waypoints_nav',
-        name='simple_waypoints_nav',
-        output='screen',
-    )
+    # simple_waypoints_nav_node = Node(
+    #     package='task1',
+    #     executable='simple_waypoints_nav',
+    #     name='simple_waypoints_nav',
+    #     output='screen',
+    # )
 
     # Create launch description and add all nodes
     ld = LaunchDescription([
         detect_rings_node,
         ring_localizator_node,
-        simple_waypoints_nav_node,
+        # simple_waypoints_nav_node,
     ])
     
     return ld

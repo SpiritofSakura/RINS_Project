@@ -17,9 +17,9 @@ def generate_launch_description():
     )
     
     detect_rings_node = Node(
-        package='dis_tutorial5',
-        executable='detect_rings.py',
-        name='detect_rings',
+        package='task1',
+        executable='detect_rings_v2',
+        name='detect_rings_v2',
         output='screen',
     )
 

@@ -8,6 +8,7 @@ from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
 
 from visualization_msgs.msg import Marker
+from std_msgs.msg import String
 
 from cv_bridge import CvBridge, CvBridgeError
 import cv2
@@ -35,12 +36,16 @@ class detect_faces(Node):
 		self.detection_color = (0,0,255)
 		self.device = self.get_parameter('device').get_parameter_value().string_value
 		self.enabled = self.get_parameter('enabled').get_parameter_value().bool_value
+		
+		# Robot state for conditional publishing
+		self.robot_state = 'IDLE'
 
 		self.bridge = CvBridge()
 		self.scan = None
 
 		self.rgb_image_sub = self.create_subscription(Image, "/oakd/rgb/preview/image_raw", self.rgb_callback, qos_profile_sensor_data)
 		self.pointcloud_sub = self.create_subscription(PointCloud2, "/oakd/rgb/preview/depth/points", self.pointcloud_callback, qos_profile_sensor_data)
+		self.robot_state_sub = self.create_subscription(String, "/robot_state", self.robot_state_callback, 10)
 
 		self.marker_pub = self.create_publisher(Marker, marker_topic, QoSReliabilityPolicy.BEST_EFFORT)
 
@@ -97,7 +102,14 @@ class detect_faces(Node):
 		except CvBridgeError as e:
 			print(e)
 
+	def robot_state_callback(self, data):
+		"""Update robot state for conditional marker publishing."""
+		self.robot_state = data.data
+
 	def pointcloud_callback(self, data):
+		# Only publish markers when idle or on patrol - avoid interfering with other tasks
+		if self.robot_state not in ['IDLE', 'PATROL']:
+			return
 
 		# get point cloud attributes
 		height = data.height
