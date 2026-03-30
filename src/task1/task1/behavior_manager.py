@@ -37,6 +37,10 @@ class BehaviorManager(Node):
         self.handled_targets = []
         self.target_match_threshold = 0.6
 
+        # Queue for pending detections (captured before AMCL is ready)
+        self.pending_targets = []  # List of {type, x, y, z, color}
+        self.amcl_pose_ready = False
+
         self.latest_robot_pose = None
         self.saved_patrol_pose = None
 
@@ -163,6 +167,11 @@ class BehaviorManager(Node):
 
     def amcl_pose_callback(self, msg: PoseWithCovarianceStamped):
         self.latest_robot_pose = msg.pose.pose
+        
+        # Mark AMCL as ready on first message
+        if not self.amcl_pose_ready:
+            self.amcl_pose_ready = True
+            self.get_logger().info('AMCL pose is now ready. Processing pending detections.')
 
     def save_current_pose(self):
         if self.latest_robot_pose is None:
@@ -232,6 +241,20 @@ class BehaviorManager(Node):
         self.target_done_callback(Empty())
 
     def main_loop(self):
+        # Process any pending detections that were queued before AMCL was ready
+        if self.amcl_pose_ready and self.pending_targets and self.active_target is None:
+            target = self.pending_targets.pop(0)
+            
+            # Double-check that this target hasn't already been handled since it was queued
+            if self.is_already_handled(target['type'], target['x'], target['y']):
+                self.get_logger().info(f"Queued {target['type']} detection already handled, skipping.")
+            else:
+                self.get_logger().info(f'Processing queued {target["type"]} detection (x={target["x"]:.2f}, y={target["y"]:.2f})')
+                if target['color'] is not None:
+                    self.activate_target(target['type'], target['x'], target['y'], target['z'], target['color'])
+                else:
+                    self.activate_target(target['type'], target['x'], target['y'], target['z'])
+
         if not self.nav_server_ready:
             if self.nav_client.wait_for_server(timeout_sec=0.01):
                 self.nav_server_ready = True
@@ -498,7 +521,7 @@ class BehaviorManager(Node):
         self.refresh_state()
 
     def face_callback(self, msg: Marker):
-        if self.current_state != 'PATROL':
+        if self.current_state not in ('PATROL', 'IDLE'):
             return
 
         if self.active_target is not None:
@@ -511,10 +534,15 @@ class BehaviorManager(Node):
         if self.is_already_handled('face', x, y):
             return
 
-        self.activate_target('face', x, y, z)
+        # Check if already in queue at same position (deduplication)
+        if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'face' for t in self.pending_targets):
+            return
+
+        # Queue the detection; it will be processed in main_loop when AMCL is ready
+        self.pending_targets.append({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None})
 
     def ring_callback(self, msg: Marker):
-        if self.current_state != 'PATROL':
+        if self.current_state not in ('PATROL', 'IDLE'):
             return
 
         if self.active_target is not None:
@@ -528,7 +556,13 @@ class BehaviorManager(Node):
             return
 
         color = self.marker_to_ring_color(msg)
-        self.activate_target('ring', x, y, z, color)
+        
+        # Check if already in queue at same position (deduplication)
+        if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'ring' for t in self.pending_targets):
+            return
+        
+        # Queue the detection; it will be processed in main_loop when AMCL is ready
+        self.pending_targets.append({'type': 'ring', 'x': x, 'y': y, 'z': z, 'color': color})
 
     def target_done_callback(self, msg: Empty):
         if self.active_target is None:

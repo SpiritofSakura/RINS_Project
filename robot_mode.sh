@@ -30,8 +30,14 @@ case "$ukaz" in
     resume_patrol)
         ros2 topic pub /resume_patrol std_msgs/msg/Empty "{}" -1
         ;;
+    start)
+        echo "Starting robot system... waiting 10 seconds for detectors to initialize."
+        sleep 10
+        echo "Activating patrol mode."
+        ros2 topic pub /patrol_command std_msgs/msg/Bool "{data: true}" -1
+        ;;
     *)
-        echo "Usage: $0 {patrol_on|patrol_off|manual_on|manual_off|idle|target_done|resume_patrol}"
+        echo "Usage: $0 {patrol_on|patrol_off|manual_on|manual_off|idle|target_done|resume_patrol|start}"
         exit 1
         ;;
 esac

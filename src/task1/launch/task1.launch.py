@@ -59,26 +59,25 @@ def generate_launch_description():
         output='screen',
     )
     
-    # Delay waypoint_navigator startup by 5 seconds
-    delayed_waypoint_navigator = TimerAction(
-        period=5.0,
-        actions=[waypoint_navigator_node],
+    # Delay ring detector and localizator startup by 6 seconds
+    delayed_detect_rings = TimerAction(
+        period=6.0,
+        actions=[detect_rings_node],
     )
 
-    # Delay ring_localizator startup by 2 seconds
     delayed_ring_localizator = TimerAction(
-        period=2.0,
+        period=6.0,
         actions=[ring_localizator_node],
     )
     
     # Create launch description and add all nodes
     ld = LaunchDescription([
         detect_people_node,
-        detect_rings_node,
         face_localizator_node,
         robot_state_overlay_node,
         behavior_manager_node,
-        delayed_waypoint_navigator,
+        waypoint_navigator_node,
+        delayed_detect_rings,
         delayed_ring_localizator,
     ])
     

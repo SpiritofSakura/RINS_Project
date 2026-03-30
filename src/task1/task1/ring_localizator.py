@@ -94,6 +94,10 @@ class RingLocalizator(Node):
 
         self.clusters: list[Cluster] = []
         self.marker_id_counter = 0
+        self.confirmed_markers = {}  # Store confirmed rings to republish: {id: (x, y, z, colour)}
+
+        # Timer to republish confirmed rings every 100ms so behavior_manager keeps receiving them
+        self.create_timer(0.1, self._republish_confirmed_rings)
 
         self.get_logger().info(
             f"RingLocalizator ready — "
@@ -152,7 +156,15 @@ class RingLocalizator(Node):
 
         cluster.confirmed = True
         colour = cluster.best_colour
-        self._publish_marker(cx, cy, cz, colour)
+        
+        # Store the confirmed marker for republishing
+        marker_id = self.marker_id_counter
+        self.marker_id_counter += 1
+        self.confirmed_markers[marker_id] = (cx, cy, cz, colour)
+        
+        # Publish immediately
+        self._publish_marker(cx, cy, cz, colour, marker_id)
+        
         self.get_logger().info(
             f"Ring confirmed: colour={colour}  "
             f"pos=({cx:.2f}, {cy:.2f})  "
@@ -161,15 +173,25 @@ class RingLocalizator(Node):
         )
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _publish_marker(self, x, y, z, colour):
+    def _republish_confirmed_rings(self):
+        """Continuously republish all confirmed rings."""
+        for marker_id, (x, y, z, colour) in self.confirmed_markers.items():
+            self._publish_marker(x, y, z, colour, marker_id)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _publish_marker(self, x, y, z, colour, marker_id=None):
         r, g, b = MARKER_COLOURS.get(colour, (1.0, 1.0, 1.0))
 
         marker = Marker()
         marker.header.frame_id = "map"
         marker.header.stamp    = self.get_clock().now().to_msg()
         marker.type            = Marker.CYLINDER
-        marker.id              = self.marker_id_counter
-        self.marker_id_counter += 1
+        
+        # Use provided marker_id or generate new one
+        if marker_id is None:
+            marker_id = self.marker_id_counter
+            self.marker_id_counter += 1
+        marker.id = marker_id
 
         marker.pose.position.x = x
         marker.pose.position.y = y
