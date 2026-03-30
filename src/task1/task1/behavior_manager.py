@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import math
+import random
+import shutil
+import subprocess
 
 import rclpy
 from rclpy.node import Node
@@ -14,497 +17,611 @@ from std_msgs.msg import Bool, String, Empty
 from visualization_msgs.msg import Marker
 
 
-def yaw_v_kvaternion(kot):
-    kvaternion = Quaternion()
-    kvaternion.z = math.sin(kot / 2.0)
-    kvaternion.w = math.cos(kot / 2.0)
-    return kvaternion
+def yaw_to_quaternion(yaw):
+    quaternion = Quaternion()
+    quaternion.z = math.sin(yaw / 2.0)
+    quaternion.w = math.cos(yaw / 2.0)
+    return quaternion
 
 
 class BehaviorManager(Node):
     def __init__(self):
         super().__init__('behavior_manager')
 
-        self.manualno_aktivno = False
-        self.patrola_zahtevana = False
-        self.patrola_koncana = False
-        self.trenutno_stanje = 'IDLE'
+        self.manual_control_active = False
+        self.patrol_requested = False
+        self.patrol_finished = False
+        self.current_state = 'IDLE'
 
-        self.aktivna_tarca = None
-        self.obdelane_tarke = []
-        self.prag_ujemanja = 0.6
+        self.active_target = None
+        self.handled_targets = []
+        self.target_match_threshold = 0.6
 
-        self.zadnja_poza_robota = None
-        self.shranjena_poza = None
+        self.latest_robot_pose = None
+        self.saved_patrol_pose = None
 
-        self.akcijski_odjemalec = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-        self.nav_streznik_pripravljen = False
-        self.cakanje_na_sprejem = False
-        self.cilj_aktiven = False
-        self.rocaj_cilja = None
-        self.rezultat_prihodnost = None
-        self.tip_nav_cilja = None
+        self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.nav_server_ready = False
+        self.waiting_for_goal_accept = False
+        self.goal_active = False
+        self.goal_handle = None
+        self.result_future = None
+        self.nav_goal_type = None
 
-        qos_lat = QoSProfile(
+        self.interaction_active = False
+        self.interaction_end_time = None
+        self.interaction_duration = 2.5
+
+        self.face_lines = [
+            "Hello there. I come in peace.",
+            "Greetings, human.",
+            "Hello there. You have been officially detected.",
+            "Another successful social interaction.",
+            "Hello. I am legally required to be polite.",
+            "Greetings. Nice face. Very recognizable.",
+            "Hello there. My sensors approve.",
+        ]
+
+        self.ring_lines = [
+            "I found a {color} ring. Very stylish.",
+            "Behold. A {color} ring.",
+            "This ring is {color}. Excellent taste.",
+            "A {color} ring has been detected. Fancy.",
+            "I found a {color} ring. Fashion approved.",
+            "A {color} ring. Quite the dramatic choice.",
+            "This appears to be a {color} ring. Impressive.",
+        ]
+
+        qos_latched = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
 
-        self.pub_sta = self.create_publisher(String, '/robot_state', qos_lat)
-        self.pub_pat = self.create_publisher(Bool, '/patrol_enabled', qos_lat)
+        self.state_publisher = self.create_publisher(String, '/robot_state', qos_latched)
+        self.patrol_enabled_publisher = self.create_publisher(Bool, '/patrol_enabled', qos_latched)
 
-        self.sub_roc = self.create_subscription(
+        self.manual_control_subscriber = self.create_subscription(
             Bool,
             '/manual_control_active',
-            self.manual_callback,
-            qos_lat
+            self.manual_control_callback,
+            qos_latched
         )
 
-        self.sub_ukp = self.create_subscription(
+        self.patrol_command_subscriber = self.create_subscription(
             Bool,
             '/patrol_command',
             self.patrol_command_callback,
-            qos_lat
+            qos_latched
         )
 
-        self.sub_kon = self.create_subscription(
+        self.patrol_finished_subscriber = self.create_subscription(
             Bool,
             '/patrol_finished',
             self.patrol_finished_callback,
-            qos_lat
+            qos_latched
         )
 
-        self.sub_obr = self.create_subscription(
+        self.face_subscriber = self.create_subscription(
             Marker,
             '/detected_face_locations',
             self.face_callback,
             10
         )
 
-        self.sub_prs = self.create_subscription(
+        self.ring_subscriber = self.create_subscription(
             Marker,
             '/detected_ring_locations',
             self.ring_callback,
             10
         )
 
-        self.sub_tar_done = self.create_subscription(
+        self.target_done_subscriber = self.create_subscription(
             Empty,
             '/target_done',
             self.target_done_callback,
             10
         )
 
-        self.sub_res_pat = self.create_subscription(
+        self.resume_patrol_subscriber = self.create_subscription(
             Empty,
             '/resume_patrol',
             self.resume_patrol_callback,
             10
         )
 
-        self.sub_amcl = self.create_subscription(
+        self.amcl_pose_subscriber = self.create_subscription(
             PoseWithCovarianceStamped,
             '/amcl_pose',
-            self.amcl_callback,
+            self.amcl_pose_callback,
             10
         )
 
-        self.casovnik = self.create_timer(0.2, self.zanka)
+        self.timer = self.create_timer(0.2, self.main_loop)
 
-        self.osvezi_stanje(sili_objavo=True)
+        self.refresh_state(force_publish=True)
 
         self.get_logger().info('Behavior manager started.')
 
-    def razdalja(self, x1, y1, x2, y2):
+    def distance(self, x1, y1, x2, y2):
         return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
 
-    def objavi_stanje(self, stanje, sili_objavo=False):
-        if stanje == self.trenutno_stanje and not sili_objavo:
+    def publish_state(self, state, force_publish=False):
+        if state == self.current_state and not force_publish:
             return
 
-        self.trenutno_stanje = stanje
+        self.current_state = state
         msg = String()
-        msg.data = stanje
-        self.pub_sta.publish(msg)
-        self.get_logger().info(f'Robot state -> {stanje}')
+        msg.data = state
+        self.state_publisher.publish(msg)
+        self.get_logger().info(f'Robot state -> {state}')
 
-    def objavi_patrol(self, omogoceno):
+    def publish_patrol_enabled(self, enabled):
         msg = Bool()
-        msg.data = omogoceno
-        self.pub_pat.publish(msg)
+        msg.data = enabled
+        self.patrol_enabled_publisher.publish(msg)
 
-    def amcl_callback(self, msg: PoseWithCovarianceStamped):
-        self.zadnja_poza_robota = msg.pose.pose
+    def amcl_pose_callback(self, msg: PoseWithCovarianceStamped):
+        self.latest_robot_pose = msg.pose.pose
 
-    def shrani_trenutno_pozo(self):
-        if self.zadnja_poza_robota is None:
+    def save_current_pose(self):
+        if self.latest_robot_pose is None:
             self.get_logger().warn('Robot pose not available yet from /amcl_pose.')
             return False
 
-        self.shranjena_poza = PoseStamped()
-        self.shranjena_poza.header.frame_id = 'map'
-        self.shranjena_poza.header.stamp = self.get_clock().now().to_msg()
-        self.shranjena_poza.pose = self.zadnja_poza_robota
+        self.saved_patrol_pose = PoseStamped()
+        self.saved_patrol_pose.header.frame_id = 'map'
+        self.saved_patrol_pose.header.stamp = self.get_clock().now().to_msg()
+        self.saved_patrol_pose.pose = self.latest_robot_pose
         return True
 
-    def zanka(self):
-        if not self.nav_streznik_pripravljen:
-            if self.akcijski_odjemalec.wait_for_server(timeout_sec=0.01):
-                self.nav_streznik_pripravljen = True
+    def speak_text(self, text):
+        self.get_logger().info(f'SPEAK: {text}')
+
+        try:
+            if shutil.which('spd-say') is not None:
+                subprocess.run(['spd-say', '--wait', text], check=False)
+                return
+
+            if shutil.which('espeak') is not None:
+                subprocess.run(['espeak', text], check=False)
+                return
+
+        except Exception as exc:
+            self.get_logger().warn(f'Speech failed: {exc}')
+
+    def marker_to_ring_color(self, marker: Marker):
+        red = round(marker.color.r, 2)
+        green = round(marker.color.g, 2)
+        blue = round(marker.color.b, 2)
+
+        color_options = {
+            (1.0, 0.0, 0.0): 'red',
+            (0.0, 1.0, 0.0): 'green',
+            (0.0, 0.4, 1.0): 'blue',
+            (1.0, 1.0, 0.0): 'yellow',
+            (1.0, 0.5, 0.0): 'orange',
+            (0.1, 0.1, 0.1): 'black',
+        }
+
+        best_color = 'unknown'
+        smallest_difference = float('inf')
+
+        for (ref_r, ref_g, ref_b), color_name in color_options.items():
+            difference = abs(red - ref_r) + abs(green - ref_g) + abs(blue - ref_b)
+            if difference < smallest_difference:
+                smallest_difference = difference
+                best_color = color_name
+
+        return best_color
+
+    def random_face_line(self):
+        return random.choice(self.face_lines)
+
+    def random_ring_line(self, color):
+        template = random.choice(self.ring_lines)
+        return template.format(color=color)
+
+    def start_interaction(self):
+        self.interaction_active = True
+        self.interaction_end_time = self.get_clock().now().nanoseconds + int(self.interaction_duration * 1e9)
+
+    def finish_interaction(self):
+        self.interaction_active = False
+        self.interaction_end_time = None
+        self.target_done_callback(Empty())
+
+    def main_loop(self):
+        if not self.nav_server_ready:
+            if self.nav_client.wait_for_server(timeout_sec=0.01):
+                self.nav_server_ready = True
                 self.get_logger().info('Behavior manager connected to navigate_to_pose.')
             return
 
-        if self.rezultat_prihodnost is None:
+        if self.interaction_active and self.interaction_end_time is not None:
+            if self.get_clock().now().nanoseconds >= self.interaction_end_time:
+                if self.current_state == 'INTERACT_FACE':
+                    self.speak_text(self.random_face_line())
+
+                elif self.current_state == 'INTERACT_RING':
+                    if self.active_target is not None and 'color' in self.active_target:
+                        self.speak_text(self.random_ring_line(self.active_target['color']))
+                    else:
+                        self.speak_text('I found a ring. Quite mysterious.')
+
+                self.finish_interaction()
             return
 
-        if not self.rezultat_prihodnost.done():
+        if self.result_future is None:
+            return
+
+        if not self.result_future.done():
             return
 
         try:
-            rezultat = self.rezultat_prihodnost.result()
-            status = rezultat.status
-        except Exception as nap:
-            self.get_logger().error(f'Navigation result error: {nap}')
+            result = self.result_future.result()
+            status = result.status
+        except Exception as exc:
+            self.get_logger().error(f'Navigation result error: {exc}')
             status = None
 
-        tip_nav = self.tip_nav_cilja
+        nav_goal_type = self.nav_goal_type
 
-        self.cilj_aktiven = False
-        self.rocaj_cilja = None
-        self.rezultat_prihodnost = None
-        self.tip_nav_cilja = None
+        self.goal_active = False
+        self.goal_handle = None
+        self.result_future = None
+        self.nav_goal_type = None
 
         if status == GoalStatus.STATUS_SUCCEEDED:
-            if tip_nav == 'approach_face':
-                self.objavi_stanje('INTERACT_FACE')
-                self.get_logger().info('Reached face target. Waiting for target_done.')
-            elif tip_nav == 'approach_ring':
-                self.objavi_stanje('INTERACT_RING')
-                self.get_logger().info('Reached ring target. Waiting for target_done.')
-            elif tip_nav == 'return_to_patrol':
+            if nav_goal_type == 'approach_face':
+                self.publish_state('INTERACT_FACE')
+                self.get_logger().info('Reached face target. Starting interaction.')
+                self.start_interaction()
+
+            elif nav_goal_type == 'approach_ring':
+                self.publish_state('INTERACT_RING')
+                self.get_logger().info('Reached ring target. Starting interaction.')
+                self.start_interaction()
+
+            elif nav_goal_type == 'return_to_patrol':
                 self.get_logger().info('Returned to saved patrol pose.')
-                self.aktivna_tarca = None
-                self.shranjena_poza = None
-                self.osvezi_stanje()
+                self.active_target = None
+                self.saved_patrol_pose = None
+                self.refresh_state()
+
             else:
                 self.get_logger().info('Temporary navigation goal succeeded.')
-        elif status in (GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_CANCELING):
-            self.get_logger().info(f'Temporary navigation cancelled: {tip_nav}')
-            self.osvezi_stanje()
-        else:
-            self.get_logger().warn(f'Temporary navigation failed: {tip_nav}, status={status}')
-            self.osvezi_stanje()
 
-    def je_ze_obdelana(self, tip, x, y):
-        for tar in self.obdelane_tarke:
-            if tar['tip'] != tip:
+        elif status in (
+            GoalStatus.STATUS_CANCELED,
+            GoalStatus.STATUS_CANCELING,
+        ):
+            self.get_logger().info(f'Temporary navigation cancelled: {nav_goal_type}')
+            self.refresh_state()
+
+        else:
+            self.get_logger().warn(f'Temporary navigation failed: {nav_goal_type}, status={status}')
+            self.refresh_state()
+
+    def is_already_handled(self, target_type, x, y):
+        for target in self.handled_targets:
+            if target['type'] != target_type:
                 continue
-            if self.razdalja(x, y, tar['x'], tar['y']) <= self.prag_ujemanja:
+            if self.distance(x, y, target['x'], target['y']) <= self.target_match_threshold:
                 return True
         return False
 
-    def izracunaj_pristopno_tocko(self, x_tar, y_tar):
-        if self.zadnja_poza_robota is None:
+    def compute_approach_point(self, target_x, target_y):
+        if self.latest_robot_pose is None:
             return None
 
-        x_rob = self.zadnja_poza_robota.position.x
-        y_rob = self.zadnja_poza_robota.position.y
+        robot_x = self.latest_robot_pose.position.x
+        robot_y = self.latest_robot_pose.position.y
 
-        dx = x_tar - x_rob
-        dy = y_tar - y_rob
-        raz = math.sqrt(dx * dx + dy * dy)
+        dx = target_x - robot_x
+        dy = target_y - robot_y
+        dist = math.sqrt(dx * dx + dy * dy)
 
-        if raz < 0.05:
+        if dist < 0.05:
             return None
 
-        odmik = 0.6
-        if raz <= odmik:
-            x_cilj = x_rob
-            y_cilj = y_rob
+        offset = 0.6
+        if dist <= offset:
+            goal_x = robot_x
+            goal_y = robot_y
         else:
-            faktor = (raz - odmik) / raz
-            x_cilj = x_rob + dx * faktor
-            y_cilj = y_rob + dy * faktor
+            factor = (dist - offset) / dist
+            goal_x = robot_x + dx * factor
+            goal_y = robot_y + dy * factor
 
         yaw = math.atan2(dy, dx)
-        return x_cilj, y_cilj, yaw
+        return goal_x, goal_y, yaw
 
-    def poslji_nav_cilj(self, x, y, yaw, tip_nav_cilja):
-        if not self.nav_streznik_pripravljen:
+    def send_nav_goal(self, x, y, yaw, nav_goal_type):
+        if not self.nav_server_ready:
             self.get_logger().warn('navigate_to_pose server is not ready yet.')
             return False
 
-        if self.cilj_aktiven or self.cakanje_na_sprejem or self.rezultat_prihodnost is not None:
+        if self.goal_active or self.waiting_for_goal_accept or self.result_future is not None:
             self.get_logger().warn('A temporary navigation goal is already active.')
             return False
 
-        cilj = PoseStamped()
-        cilj.header.frame_id = 'map'
-        cilj.header.stamp = self.get_clock().now().to_msg()
-        cilj.pose.position.x = float(x)
-        cilj.pose.position.y = float(y)
-        cilj.pose.orientation = yaw_v_kvaternion(float(yaw))
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = 'map'
+        goal_pose.header.stamp = self.get_clock().now().to_msg()
+        goal_pose.pose.position.x = float(x)
+        goal_pose.pose.position.y = float(y)
+        goal_pose.pose.orientation = yaw_to_quaternion(float(yaw))
 
-        sporocilo = NavigateToPose.Goal()
-        sporocilo.pose = cilj
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = goal_pose
 
-        self.tip_nav_cilja = tip_nav_cilja
-        self.cakanje_na_sprejem = True
+        self.nav_goal_type = nav_goal_type
+        self.waiting_for_goal_accept = True
 
-        prihodnost = self.akcijski_odjemalec.send_goal_async(sporocilo)
-        prihodnost.add_done_callback(self.obdelaj_sprejem)
+        future = self.nav_client.send_goal_async(goal_msg)
+        future.add_done_callback(self.goal_response_callback)
 
         self.get_logger().info(
-            f'Sending temporary goal [{tip_nav_cilja}] x={x:.2f}, y={y:.2f}, yaw={yaw:.2f}'
+            f'Sending temporary goal [{nav_goal_type}] x={x:.2f}, y={y:.2f}, yaw={yaw:.2f}'
         )
         return True
 
-    def obdelaj_sprejem(self, prihodnost):
-        self.cakanje_na_sprejem = False
+    def goal_response_callback(self, future):
+        self.waiting_for_goal_accept = False
 
         try:
-            rocaj_cilja = prihodnost.result()
-        except Exception as nap:
-            self.get_logger().error(f'Error while sending temporary goal: {nap}')
-            self.tip_nav_cilja = None
-            self.osvezi_stanje()
+            goal_handle = future.result()
+        except Exception as exc:
+            self.get_logger().error(f'Error while sending temporary goal: {exc}')
+            self.nav_goal_type = None
+            self.refresh_state()
             return
 
-        if not rocaj_cilja.accepted:
-            self.get_logger().warn(f'Temporary goal rejected: {self.tip_nav_cilja}')
-            self.tip_nav_cilja = None
-            self.osvezi_stanje()
+        if not goal_handle.accepted:
+            self.get_logger().warn(f'Temporary goal rejected: {self.nav_goal_type}')
+            self.nav_goal_type = None
+            self.refresh_state()
             return
 
-        self.rocaj_cilja = rocaj_cilja
-        self.cilj_aktiven = True
-        self.rezultat_prihodnost = rocaj_cilja.get_result_async()
+        self.goal_handle = goal_handle
+        self.goal_active = True
+        self.result_future = goal_handle.get_result_async()
 
-        self.get_logger().info(f'Temporary goal accepted: {self.tip_nav_cilja}')
+        self.get_logger().info(f'Temporary goal accepted: {self.nav_goal_type}')
 
-    def preklici_zacasni_cilj(self):
-        if self.rocaj_cilja is not None and self.cilj_aktiven:
+    def cancel_temporary_goal(self):
+        if self.goal_handle is not None and self.goal_active:
             self.get_logger().info('Cancelling temporary navigation goal...')
-            prihodnost = self.rocaj_cilja.cancel_goal_async()
-            prihodnost.add_done_callback(self.obdelaj_preklic)
+            future = self.goal_handle.cancel_goal_async()
+            future.add_done_callback(self.cancel_done_callback)
 
-    def obdelaj_preklic(self, prihodnost):
+    def cancel_done_callback(self, future):
         try:
-            _ = prihodnost.result()
-        except Exception as nap:
-            self.get_logger().warn(f'Cancel temporary goal failed: {nap}')
+            _ = future.result()
+        except Exception as exc:
+            self.get_logger().warn(f'Cancel temporary goal failed: {exc}')
 
-        self.cilj_aktiven = False
-        self.cakanje_na_sprejem = False
-        self.rocaj_cilja = None
-        self.rezultat_prihodnost = None
-        self.tip_nav_cilja = None
+        self.goal_active = False
+        self.waiting_for_goal_accept = False
+        self.goal_handle = None
+        self.result_future = None
+        self.nav_goal_type = None
 
-    def osvezi_stanje(self, sili_objavo=False):
-        if self.manualno_aktivno:
-            self.objavi_patrol(False)
-            self.objavi_stanje('MANUAL_CONTROL', sili_objavo)
+    def refresh_state(self, force_publish=False):
+        if self.manual_control_active:
+            self.publish_patrol_enabled(False)
+            self.publish_state('MANUAL_CONTROL', force_publish)
             return
 
-        if self.aktivna_tarca is not None:
-            if self.tip_nav_cilja == 'return_to_patrol' or self.trenutno_stanje == 'RETURN_TO_PATROL':
-                self.objavi_patrol(False)
-                self.objavi_stanje('RETURN_TO_PATROL', sili_objavo)
+        if self.active_target is not None:
+            if self.nav_goal_type == 'return_to_patrol' or self.current_state == 'RETURN_TO_PATROL':
+                self.publish_patrol_enabled(False)
+                self.publish_state('RETURN_TO_PATROL', force_publish)
                 return
 
-            if self.tip_nav_cilja == 'approach_face' or self.trenutno_stanje == 'INTERACT_FACE':
-                self.objavi_patrol(False)
-                if self.trenutno_stanje == 'INTERACT_FACE':
-                    self.objavi_stanje('INTERACT_FACE', sili_objavo)
+            if self.nav_goal_type == 'approach_face' or self.current_state == 'INTERACT_FACE':
+                self.publish_patrol_enabled(False)
+                if self.current_state == 'INTERACT_FACE':
+                    self.publish_state('INTERACT_FACE', force_publish)
                 else:
-                    self.objavi_stanje('APPROACH_FACE', sili_objavo)
+                    self.publish_state('APPROACH_FACE', force_publish)
                 return
 
-            if self.tip_nav_cilja == 'approach_ring' or self.trenutno_stanje == 'INTERACT_RING':
-                self.objavi_patrol(False)
-                if self.trenutno_stanje == 'INTERACT_RING':
-                    self.objavi_stanje('INTERACT_RING', sili_objavo)
+            if self.nav_goal_type == 'approach_ring' or self.current_state == 'INTERACT_RING':
+                self.publish_patrol_enabled(False)
+                if self.current_state == 'INTERACT_RING':
+                    self.publish_state('INTERACT_RING', force_publish)
                 else:
-                    self.objavi_stanje('APPROACH_RING', sili_objavo)
+                    self.publish_state('APPROACH_RING', force_publish)
                 return
 
-            if self.aktivna_tarca['tip'] == 'face':
-                self.objavi_patrol(False)
-                self.objavi_stanje('APPROACH_FACE', sili_objavo)
+            if self.active_target['type'] == 'face':
+                self.publish_patrol_enabled(False)
+                self.publish_state('APPROACH_FACE', force_publish)
                 return
 
-            if self.aktivna_tarca['tip'] == 'ring':
-                self.objavi_patrol(False)
-                self.objavi_stanje('APPROACH_RING', sili_objavo)
+            if self.active_target['type'] == 'ring':
+                self.publish_patrol_enabled(False)
+                self.publish_state('APPROACH_RING', force_publish)
                 return
 
-        if self.patrola_zahtevana and not self.patrola_koncana:
-            self.objavi_patrol(True)
-            self.objavi_stanje('PATROL', sili_objavo)
+        if self.patrol_requested and not self.patrol_finished:
+            self.publish_patrol_enabled(True)
+            self.publish_state('PATROL', force_publish)
             return
 
-        self.objavi_patrol(False)
-        self.objavi_stanje('IDLE', sili_objavo)
+        self.publish_patrol_enabled(False)
+        self.publish_state('IDLE', force_publish)
 
-    def aktiviraj_tarco(self, tip, x, y, z):
-        if self.aktivna_tarca is not None:
+    def activate_target(self, target_type, x, y, z, color=None):
+        if self.active_target is not None:
             return
 
-        if self.zadnja_poza_robota is None:
+        if self.latest_robot_pose is None:
             self.get_logger().warn('Ignoring target because /amcl_pose is not available yet.')
             return
 
-        if not self.shrani_trenutno_pozo():
+        if not self.save_current_pose():
             return
 
-        pristop = self.izracunaj_pristopno_tocko(x, y)
-        if pristop is None:
+        approach = self.compute_approach_point(x, y)
+        if approach is None:
             self.get_logger().warn('Could not compute an approach goal.')
             return
 
-        self.aktivna_tarca = {
-            'tip': tip,
+        self.active_target = {
+            'type': target_type,
             'x': x,
             'y': y,
             'z': z,
         }
 
+        if color is not None:
+            self.active_target['color'] = color
+
         self.get_logger().info(
-            f'New target selected -> type={tip}, x={x:.2f}, y={y:.2f}, z={z:.2f}'
+            f'New target selected -> type={target_type}, x={x:.2f}, y={y:.2f}, z={z:.2f}'
         )
 
-        self.objavi_patrol(False)
+        self.publish_patrol_enabled(False)
 
-        x_cilj, y_cilj, yaw = pristop
-        tip_nav = 'approach_face' if tip == 'face' else 'approach_ring'
+        goal_x, goal_y, goal_yaw = approach
+        nav_goal_type = 'approach_face' if target_type == 'face' else 'approach_ring'
 
-        if not self.poslji_nav_cilj(x_cilj, y_cilj, yaw, tip_nav):
-            self.aktivna_tarca = None
-            self.shranjena_poza = None
-            self.osvezi_stanje()
+        if not self.send_nav_goal(goal_x, goal_y, goal_yaw, nav_goal_type):
+            self.active_target = None
+            self.saved_patrol_pose = None
+            self.refresh_state()
             return
 
-        self.osvezi_stanje()
+        self.refresh_state()
 
     def face_callback(self, msg: Marker):
-        if self.trenutno_stanje != 'PATROL':
+        if self.current_state != 'PATROL':
             return
 
-        if self.aktivna_tarca is not None:
+        if self.active_target is not None:
             return
 
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
 
-        if self.je_ze_obdelana('face', x, y):
+        if self.is_already_handled('face', x, y):
             return
 
-        self.aktiviraj_tarco('face', x, y, z)
+        self.activate_target('face', x, y, z)
 
     def ring_callback(self, msg: Marker):
-        if self.trenutno_stanje != 'PATROL':
+        if self.current_state != 'PATROL':
             return
 
-        if self.aktivna_tarca is not None:
+        if self.active_target is not None:
             return
 
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
 
-        if self.je_ze_obdelana('ring', x, y):
+        if self.is_already_handled('ring', x, y):
             return
 
-        self.aktiviraj_tarco('ring', x, y, z)
+        color = self.marker_to_ring_color(msg)
+        self.activate_target('ring', x, y, z, color)
 
     def target_done_callback(self, msg: Empty):
-        if self.aktivna_tarca is None:
+        if self.active_target is None:
             self.get_logger().info('No active target to mark as done.')
             return
 
-        if self.trenutno_stanje not in ('INTERACT_FACE', 'INTERACT_RING', 'APPROACH_FACE', 'APPROACH_RING'):
+        if self.current_state not in ('INTERACT_FACE', 'INTERACT_RING', 'APPROACH_FACE', 'APPROACH_RING'):
             self.get_logger().info('Target done received, but current state is not target handling.')
             return
 
-        self.obdelane_tarke.append(self.aktivna_tarca)
+        self.handled_targets.append(self.active_target)
 
         self.get_logger().info(
-            f"Target completed -> type={self.aktivna_tarca['tip']}, "
-            f"x={self.aktivna_tarca['x']:.2f}, y={self.aktivna_tarca['y']:.2f}"
+            f"Target completed -> type={self.active_target['type']}, "
+            f"x={self.active_target['x']:.2f}, y={self.active_target['y']:.2f}"
         )
 
-        if self.shranjena_poza is None:
+        if self.saved_patrol_pose is None:
             self.get_logger().warn('No saved patrol pose. Clearing target without return.')
-            self.aktivna_tarca = None
-            self.osvezi_stanje()
+            self.active_target = None
+            self.refresh_state()
             return
 
-        x = self.shranjena_poza.pose.position.x
-        y = self.shranjena_poza.pose.position.y
+        x = self.saved_patrol_pose.pose.position.x
+        y = self.saved_patrol_pose.pose.position.y
         yaw = 2.0 * math.atan2(
-            self.shranjena_poza.pose.orientation.z,
-            self.shranjena_poza.pose.orientation.w
+            self.saved_patrol_pose.pose.orientation.z,
+            self.saved_patrol_pose.pose.orientation.w
         )
 
-        if self.cilj_aktiven:
-            self.preklici_zacasni_cilj()
+        if self.goal_active:
+            self.cancel_temporary_goal()
 
-        if self.poslji_nav_cilj(x, y, yaw, 'return_to_patrol'):
-            self.objavi_stanje('RETURN_TO_PATROL')
+        if self.send_nav_goal(x, y, yaw, 'return_to_patrol'):
+            self.publish_state('RETURN_TO_PATROL')
         else:
             self.get_logger().warn('Could not start return-to-patrol navigation.')
-            self.aktivna_tarca = None
-            self.shranjena_poza = None
-            self.osvezi_stanje()
+            self.active_target = None
+            self.saved_patrol_pose = None
+            self.refresh_state()
 
     def resume_patrol_callback(self, msg: Empty):
-        if self.aktivna_tarca is not None:
+        if self.active_target is not None:
             self.get_logger().info('Clearing active target and resuming patrol.')
         else:
             self.get_logger().info('No active target. Refreshing state.')
 
-        if self.cilj_aktiven:
-            self.preklici_zacasni_cilj()
+        if self.goal_active:
+            self.cancel_temporary_goal()
 
-        self.aktivna_tarca = None
-        self.shranjena_poza = None
-        self.osvezi_stanje()
+        self.interaction_active = False
+        self.interaction_end_time = None
+        self.active_target = None
+        self.saved_patrol_pose = None
+        self.refresh_state()
 
-    def manual_callback(self, msg: Bool):
-        self.manualno_aktivno = msg.data
+    def manual_control_callback(self, msg: Bool):
+        self.manual_control_active = msg.data
 
-        if self.manualno_aktivno and self.cilj_aktiven:
-            self.preklici_zacasni_cilj()
+        if self.manual_control_active and self.goal_active:
+            self.cancel_temporary_goal()
 
-        self.osvezi_stanje()
+        if self.manual_control_active:
+            self.interaction_active = False
+            self.interaction_end_time = None
+
+        self.refresh_state()
 
     def patrol_command_callback(self, msg: Bool):
-        self.patrola_zahtevana = msg.data
+        self.patrol_requested = msg.data
 
-        if self.patrola_zahtevana:
-            self.patrola_koncana = False
+        if self.patrol_requested:
+            self.patrol_finished = False
 
-        if not self.patrola_zahtevana and self.aktivna_tarca is None and not self.manualno_aktivno:
-            self.objavi_patrol(False)
+        if not self.patrol_requested and self.active_target is None and not self.manual_control_active:
+            self.publish_patrol_enabled(False)
 
-        self.osvezi_stanje()
+        self.refresh_state()
 
     def patrol_finished_callback(self, msg: Bool):
         if not msg.data:
             return
 
-        self.patrola_koncana = True
-        self.patrola_zahtevana = False
-        self.osvezi_stanje()
+        self.patrol_finished = True
+        self.patrol_requested = False
+        self.refresh_state()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    vozlisce = BehaviorManager()
-    rclpy.spin(vozlisce)
-    vozlisce.destroy_node()
+    node = BehaviorManager()
+    rclpy.spin(node)
+    node.destroy_node()
     rclpy.shutdown()
 
 
