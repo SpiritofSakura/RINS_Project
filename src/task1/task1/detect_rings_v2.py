@@ -39,7 +39,7 @@ HOUGH_MIN_RADIUS = 1          # Minimum circle radius in pixels (lowered to dete
 HOUGH_MAX_RADIUS = 70          # Maximum circle radius (px)
 
 # ── Cross-frame confirmation ──────────────────────────────────────────────────
-CONFIRM_HITS = 11               # frames a ring must be seen before confirmed (strict but fair)
+CONFIRM_HITS = 8               # frames a ring must be seen before confirmed (strict but fair)
 MAX_MISSED = 4                  # frames without match before dropping candidate (balanced)
 MATCH_DIST_PX = 35              # pixel radius to match circles between frames
 
