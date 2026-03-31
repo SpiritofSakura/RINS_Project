@@ -248,7 +248,7 @@ class RingDetectorV2(Node):
         cv2.imshow("Disparity", disparity_8u)
         cv2.imshow("Hough Circles", debug_img)
         cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
-        cv2.imshow("Masked view", cv2.cvtColor(combined_visualization, cv2.COLOR_GRAY2BGR))
+        cv2.imshow("Masked view", combined_visualization)
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
