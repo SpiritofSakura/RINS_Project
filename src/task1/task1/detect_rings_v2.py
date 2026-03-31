@@ -47,6 +47,29 @@ MATCH_DIST_PX = 35              # pixel radius to match circles between frames
 MAX_RANGE_M = 7.0               # beyond this → "nothing" / sky
 RIM_SOLID_FRAC = 0.35           # fraction of rim samples that must be solid
 
+# ── Colour HSV ranges (from detect_rings.py) ──────────────────────────────────
+COLOUR_RANGES = {
+    "red": [
+        (np.array([0,   130,  60]), np.array([10,  255, 255])),
+        (np.array([168, 130,  60]), np.array([180, 255, 255])),
+    ],
+    "green": [
+        (np.array([40,  80,  50]), np.array([90, 255, 255])),
+    ],
+    "blue": [
+        (np.array([100, 80,  50]), np.array([140, 255, 255])),
+    ],
+    "yellow": [
+        (np.array([20,  100, 100]), np.array([35, 255, 255])),
+    ],
+    "orange": [
+        (np.array([10,  150,  80]), np.array([20, 255, 255])),
+    ],
+    "black": [
+        (np.array([0, 0, 0]), np.array([180, 255, 50])),
+    ],
+}
+
 # ── Colour class names ────────────────────────────────────────────────────────
 COLOUR_NAMES = ['red', 'green', 'blue', 'yellow', 'orange', 'black']
 
@@ -97,6 +120,12 @@ class RingDetectorV2(Node):
         # Debug windows
         cv2.namedWindow("Disparity", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Hough Circles", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Masked view", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Color+Disparity Mask", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Combined: Ring + Color+Disparity", cv2.WINDOW_NORMAL)
+        
+        # Store combined mask for color extraction
+        self.combined_mask = None
 
         self.get_logger().info("RingDetector V2 ready (Hough circle mode).")
 
@@ -158,6 +187,9 @@ class RingDetectorV2(Node):
         disparity_8u = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         disparity_8u = cv2.GaussianBlur(disparity_8u, (5, 5), 0)
 
+        # Also compute disparity mask once for later use
+        disparity_mask = (disparity > 0).astype(np.uint8) * 255
+
         # Hough circle detection
         circles = cv2.HoughCircles(
             disparity_8u,
@@ -170,42 +202,66 @@ class RingDetectorV2(Node):
             maxRadius=HOUGH_MAX_RADIUS,
         )
 
+        # Compute disparity mask for later use
+        disparity_mask = (disparity > 0).astype(np.uint8) * 255
+        
         frame_detections = []
         if circles is not None:
             self.get_logger().info(f"Hough found {len(circles[0])} circles - publishing all")
             for circle in circles[0]:
                 cx, cy, radius = int(circle[0]), int(circle[1]), int(circle[2])
-                ring = self._evaluate_circle(cx, cy, radius, depth_m, self.rgb_image)
+                ring = self._evaluate_circle(cx, cy, radius, depth_m, self.rgb_image, disparity_mask)
                 if ring is not None:
                     frame_detections.append(ring)
             self.get_logger().info(f"Publishing {len(frame_detections)} detections")
 
         # ── Publish each valid detection IMMEDIATELY ───────────────────────────────────
         for detection in frame_detections:
-            # Publish to /ring_marker (color will be inferred from point cloud RGB)
+            # Publish to /ring_marker (color will be inferred from patch mask)
             # Let ring_localizator handle aggregation and confirmation
-            self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'], detection['ring_patch'], detection['radius'])
+            self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'], 
+                                     detection['ring_patch'], detection['radius'], detection['patch_mask'])
 
         # Debug visualization
         debug_img = self.rgb_image.copy()
+        ring_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
+        combined_visualization_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
         if circles is not None:
             for circle in circles[0]:
                 cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
                 cv2.circle(debug_img, (cx, cy), r, (0, 255, 0), 2)
                 cv2.circle(debug_img, (cx, cy), 2, (0, 0, 255), 3)
+                # Create mask for detected rings
+                cv2.circle(ring_mask, (cx, cy), r, 255, -1)
+        
+        # Dilate ring mask by 20% (to expand ring boundaries)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        dilated_ring_mask = cv2.dilate(ring_mask, kernel, iterations=2)
+        
+        # Combine: dilated ring mask AND disparity mask (valid depth)
+        combined_mask_display = cv2.bitwise_and(dilated_ring_mask, disparity_mask)
+        
+        # Apply combined mask (dilated ring + disparity) to RGB image for visualization
+        masked_view = cv2.bitwise_and(self.rgb_image, self.rgb_image, mask=combined_mask_display)
+        
+        # Combine ring mask with color+disparity mask to see intersection
+        combined_visualization = cv2.bitwise_and(ring_mask, combined_mask_display)
 
         cv2.imshow("Disparity", disparity_8u)
         cv2.imshow("Hough Circles", debug_img)
+        cv2.imshow("Masked view", masked_view)
+        cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
+        cv2.imshow("Combined: Ring + Color+Disparity", cv2.cvtColor(combined_visualization, cv2.COLOR_GRAY2BGR))
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
         """Update robot state for conditional marker publishing."""
         self.robot_state = data.data
 
-    def _evaluate_circle(self, cx, cy, radius, depth_m, rgb_img):
+    def _evaluate_circle(self, cx, cy, radius, depth_m, rgb_img, disparity_mask):
         """
         Accept any circle Hough found - let ring_localizator handle robustness via aggregation.
-        Just extract the ring patch for color classification.
+        Extract ring patch for color classification, using combined dilated ring + disparity mask.
         """
         h, w = depth_m.shape
         if not (radius < cx < w - radius and radius < cy < h - radius):
@@ -217,18 +273,74 @@ class RingDetectorV2(Node):
             # Use a default distance if depth is invalid
             centre_depth = 1.0
 
+        # Create individual ring mask for this circle
+        ring_circle_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.circle(ring_circle_mask, (cx, cy), radius, 255, -1)
+        
+        # Dilate ring mask by 20% (to expand ring boundaries)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        dilated_circle_mask = cv2.dilate(ring_circle_mask, kernel, iterations=2)
+        
+        # Combine: dilated ring circle mask AND disparity mask (valid depth)
+        combined_circle_mask = cv2.bitwise_and(dilated_circle_mask, disparity_mask)
+
         # Extract ring patch for colour classification
+        # Use combined_mask (dilated ring + disparity) to get only valid ring pixels
         patch_size = max(int(radius * 2.5), 64)
         x1 = max(0, cx - patch_size // 2)
         x2 = min(w, cx + patch_size // 2)
         y1 = max(0, cy - patch_size // 2)
         y2 = min(h, cy + patch_size // 2)
+        
+        # Extract patch and its corresponding mask
         ring_patch = rgb_img[y1:y2, x1:x2].copy()
+        patch_mask = combined_circle_mask[y1:y2, x1:x2]
 
         return {
             "cx": cx, "cy": cy, "radius": radius,
-            "depth_m": centre_depth, "ring_patch": ring_patch
+            "depth_m": centre_depth, "ring_patch": ring_patch,
+            "patch_mask": patch_mask  # Pass mask for color extraction
         }
+
+    def _classify_ring_colour_with_mask(self, ring_patch, patch_mask):
+        """
+        Classify ring colour using only pixels where patch_mask is active (255).
+        This filters out the grey holder and other non-ring material.
+        Uses mean colour of masked pixels.
+        """
+        if ring_patch.size == 0 or patch_mask.size == 0:
+            return "unknown"
+
+        # Get only pixels where mask is active (255)
+        mask_pixels = patch_mask == 255
+        masked_patch = ring_patch[mask_pixels]
+        
+        if len(masked_patch) < 10:
+            return "unknown"
+
+        # Get mean color of masked pixels
+        mean_bgr = np.mean(masked_patch, axis=0).astype(np.uint8)
+        
+        # Convert BGR to HSV for classification
+        bgr_array = np.uint8([[[mean_bgr[0], mean_bgr[1], mean_bgr[2]]]])
+        hsv = cv2.cvtColor(bgr_array, cv2.COLOR_BGR2HSV)[0, 0]
+        h, s, v = hsv
+
+        # Simple HSV-based classification
+        if s < 50:  # Low saturation → black/grey
+            return "black"
+        elif 0 <= h < 10 or 170 <= h <= 180:
+            return "red"
+        elif 10 <= h < 20:
+            return "orange"
+        elif 20 <= h < 32:  # Yellow
+            return "yellow"
+        elif 32 <= h < 85:  # Green
+            return "green"
+        elif 100 <= h < 130:
+            return "blue"
+        else:
+            return "unknown"
 
     def _classify_ring_colour(self, ring_patch):
         """
@@ -430,10 +542,10 @@ class RingDetectorV2(Node):
             self.get_logger().warn(f"Failed to classify PC RGB: {e}")
             return "unknown"
 
-    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch, radius):
+    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch, radius, patch_mask):
         """
         Publish raw detection to /ring_marker using 3D position and color from image.
-        Uses disparity mask to extract color from within the ring boundary (most reliable).
+        Uses patch_mask to extract color from only the valid ring pixels (filters grey holder).
         Ring_localizator will aggregate 10+ detections in 0.6m radius for confirmation.
         Only publishes if robot is in IDLE or PATROL state.
         """
@@ -472,9 +584,9 @@ class RingDetectorV2(Node):
             except Exception as e:
                 self.get_logger().debug(f"Failed to get point cloud position: {e}")
 
-        # Extract color from within the ring boundary using the image
+        # Extract color from ring patch using the mask (filters out grey holder)
         # This is more reliable than point cloud samples because we know the ring pixels
-        colour = self._extract_ring_colour_from_image(cx, cy, radius, self.rgb_image)
+        colour = self._classify_ring_colour_with_mask(ring_patch, patch_mask)
 
         r, g, b = MARKER_COLOURS.get(colour, (0.5, 0.5, 0.5))
 

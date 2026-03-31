@@ -117,6 +117,7 @@ class RingDetector(Node):
         cv2.namedWindow("Colour masks",  cv2.WINDOW_NORMAL)
         cv2.namedWindow("Detected rings", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Depth window",   cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Masked view",    cv2.WINDOW_NORMAL)
 
         self.get_logger().info("RingDetector ready (colour-first mode).")
 
@@ -201,6 +202,11 @@ class RingDetector(Node):
         cv2.imshow("Colour masks",
                    cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR))
         cv2.imshow("Detected rings", cv_image)
+        
+        # Show camera view through the color detection mask
+        masked_view = cv2.bitwise_and(cv_image, cv_image, mask=combined_mask)
+        cv2.imshow("Masked view", masked_view)
+        
         cv2.waitKey(1)
 
     # ── Contour → ring dict (or None) ─────────────────────────────────────────
