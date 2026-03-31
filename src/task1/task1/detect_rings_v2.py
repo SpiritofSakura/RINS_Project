@@ -557,7 +557,7 @@ class RingDetectorV2(Node):
             return
 
         # Get 3D position from point cloud (accurate, in base_link frame)
-        x, y, z = depth_m, 0.0, 0.0  # Fallback to simple depth
+        x, y, z = None, None, None
         used_pointcloud = False
         
         if self.pointcloud_xyz is not None:
@@ -583,6 +583,11 @@ class RingDetectorV2(Node):
                         
             except Exception as e:
                 self.get_logger().debug(f"Failed to get point cloud position: {e}")
+
+        # Reject detection if no valid 3D position found - don't publish false positives
+
+        if x is None or y is None or z is None:
+            return
 
         # Extract color from ring patch using the mask (filters out grey holder)
         # This is more reliable than point cloud samples because we know the ring pixels
