@@ -94,14 +94,6 @@ class RingDetector(Node):
         self.bridge    = CvBridge()
         self.depth_raw = None
 
-        # Startup delay: don't confirm rings until N seconds have passed
-        self.declare_parameter('startup_delay_seconds', 0)
-        startup_delay_seconds = self.get_parameter('startup_delay_seconds').value
-        self.startup_time = self.get_clock().now().nanoseconds
-        self.startup_delay_ns = int(startup_delay_seconds * 1_000_000_000)
-        if self.startup_delay_ns > 0:
-            self.get_logger().info(f"Ring confirmation delayed by {startup_delay_seconds} seconds")
-
         # Rings confirmed in the current frame — list of dicts
         self.confirmed_rings = []
 
@@ -196,18 +188,10 @@ class RingDetector(Node):
             if self._candidates[i]["missed"] > MAX_MISSED:
                 self._candidates.pop(i)
 
-        # Only draw/report candidates that have enough hits (but only after startup delay)
-        current_time = self.get_clock().now().nanoseconds
-        startup_elapsed_ns = current_time - self.startup_time
-        if startup_elapsed_ns >= self.startup_delay_ns:
-            # Startup delay has passed, confirm rings normally
-            self.confirmed_rings = [
-                c["ring"] for c in self._candidates if c["hits"] >= CONFIRM_HITS
-            ]
-        else:
-            # Still in startup delay, don't confirm yet (but keep accumulating candidates)
-            self.confirmed_rings = []
-        
+        # Only draw/report candidates that have enough hits
+        self.confirmed_rings = [
+            c["ring"] for c in self._candidates if c["hits"] >= CONFIRM_HITS
+        ]
         for ring in self.confirmed_rings:
             self._draw_ring(cv_image, ring)
         if self.confirmed_rings:
