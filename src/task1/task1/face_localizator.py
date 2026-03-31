@@ -13,7 +13,7 @@ class FaceLocalizator(Node):
     def __init__(self):
         super().__init__('face_localizator')
 
-        self.threshold_detections = 20
+        self.threshold_detections = 15
         self.cluster_radius = 1.0
         self.duplicate_radius = 0.9
 

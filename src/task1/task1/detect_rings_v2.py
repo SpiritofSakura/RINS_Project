@@ -34,9 +34,9 @@ SENSOR_QOS = QoSProfile(
 HOUGH_DP = 1                    # Inverse ratio of accumulator resolution
 HOUGH_MIN_DIST = 40             # Minimum distance between circle centres
 HOUGH_PARAM1 = 48               # Upper threshold for Canny edge (balanced strictness)
-HOUGH_PARAM2 = 29               # Accumulator threshold (strict but allows real rings)
-HOUGH_MIN_RADIUS = 9            # Minimum circle radius in pixels (balanced)
-HOUGH_MAX_RADIUS = 100          # Maximum circle radius (px)
+HOUGH_PARAM2 = 25               # Accumulator threshold (strict but allows real rings)
+HOUGH_MIN_RADIUS = 1          # Minimum circle radius in pixels (lowered to detect black ring)
+HOUGH_MAX_RADIUS = 70          # Maximum circle radius (px)
 
 # ── Cross-frame confirmation ──────────────────────────────────────────────────
 CONFIRM_HITS = 11               # frames a ring must be seen before confirmed (strict but fair)
@@ -184,7 +184,7 @@ class RingDetectorV2(Node):
         for detection in frame_detections:
             # Publish to /ring_marker (color will be inferred from point cloud RGB)
             # Let ring_localizator handle aggregation and confirmation
-            self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'], detection['ring_patch'])
+            self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'], detection['ring_patch'], detection['radius'])
 
         # Debug visualization
         debug_img = self.rgb_image.copy()
@@ -211,7 +211,7 @@ class RingDetectorV2(Node):
         if not (radius < cx < w - radius and radius < cy < h - radius):
             return None
 
-        # Get center depth for marker position, but don't validate it
+        # Get center depth for marker position
         centre_depth = depth_m[cy, cx]
         if centre_depth < 0.1 or centre_depth > MAX_RANGE_M:
             # Use a default distance if depth is invalid
@@ -262,9 +262,111 @@ class RingDetectorV2(Node):
             return "red"
         elif 10 <= h < 20:
             return "orange"
-        elif 20 <= h < 40:
+        elif 20 <= h < 32:  # Yellow (narrower to avoid green confusion)
             return "yellow"
-        elif 40 <= h < 80:
+        elif 32 <= h < 85:  # Green (wider range, starts earlier)
+            return "green"
+        elif 100 <= h < 130:
+            return "blue"
+        else:
+            return "unknown"
+
+    def _extract_ring_colour_from_image(self, cx, cy, radius, image):
+        """
+        Extract ring color from image using the detected circle boundary.
+        Samples pixels within the ring region to get the most accurate color.
+        This is more reliable than point cloud because we know the exact ring pixels.
+        """
+        if image is None or image.size == 0:
+            return "unknown"
+        
+        h, w = image.shape[:2]
+        
+        # Create circular mask for the ring (inner boundary to avoid background)
+        # Sample from inner 70% to center, avoiding the outer edge which touches background
+        mask = np.zeros((h, w), dtype=np.uint8)
+        inner_radius = max(int(radius * 0.5), 1)  # Inner 50% of radius
+        outer_radius = radius
+        
+        # Draw filled circle for outer boundary
+        cv2.circle(mask, (cx, cy), outer_radius, 255, -1)
+        # Draw filled circle for inner boundary (to exclude center)
+        cv2.circle(mask, (cx, cy), inner_radius, 0, -1)
+        
+        # Extract pixels within the ring region
+        ring_pixels = image[mask > 0]  # All pixels where mask is non-zero
+        
+        if len(ring_pixels) < 10:
+            return "unknown"
+        
+        # Convert to float and reshape
+        pixels = ring_pixels.reshape(-1, 3).astype(np.float32)
+        
+        # Remove near-black pixels (shadow at center)
+        bright_mask = np.sum(pixels, axis=1) > 30
+        pixels_fg = pixels[bright_mask]
+        
+        if len(pixels_fg) < 10:
+            return "unknown"
+        
+        # Get mean color of ring pixels
+        dominant_bgr = np.mean(pixels_fg, axis=0).astype(np.uint8)
+        
+        # Convert BGR to HSV for classification
+        dominant_hsv = cv2.cvtColor(np.uint8([[dominant_bgr]]), cv2.COLOR_BGR2HSV)[0, 0]
+        h, s, v = dominant_hsv
+        
+        # HSV-based color classification
+        if s < 50:  # Low saturation → black/white/gray
+            return "black"
+        elif 0 <= h < 10 or 170 <= h <= 180:  # Red hues
+            return "red"
+        elif 10 <= h < 20:  # Orange-red
+            return "orange"
+        elif 20 <= h < 32:  # Yellow (narrower to avoid green)
+            return "yellow"
+        elif 32 <= h < 85:  # Green (wider range)
+            return "green"
+        elif 100 <= h < 130:  # Blue
+            return "blue"
+        else:
+            return "unknown"
+
+    def _classify_ring_colour(self, ring_patch):
+        """
+        Classify ring colour using mean colour of bright pixels in patch.
+        No sklearn required—uses only numpy and OpenCV.
+        """
+        if ring_patch.size == 0:
+            return "unknown"
+
+        # Reshape patch to list of BGR pixels
+        pixels = ring_patch.reshape(-1, 3).astype(np.float32)
+
+        # Remove near-black pixels (background/shadow)
+        bright_mask = np.sum(pixels, axis=1) > 30
+        pixels_fg = pixels[bright_mask]
+
+        if len(pixels_fg) < 10:
+            return "unknown"
+
+        # Use mean colour of foreground pixels
+        dominant_bgr = np.mean(pixels_fg, axis=0).astype(np.uint8)
+
+        # Convert BGR to HSV for colour matching
+        dominant_hsv = cv2.cvtColor(np.uint8([[dominant_bgr]]), cv2.COLOR_BGR2HSV)[0, 0]
+        h, s, v = dominant_hsv
+
+        # Simple HSV-based classification
+        if s < 50:  # Low saturation → black/white
+            return "black"
+        elif 0 <= h < 10 or 170 <= h <= 180:
+            return "red"
+        elif 10 <= h < 20:
+            return "orange"
+        elif 20 <= h < 32:  # Yellow (narrower to avoid green confusion)
+            return "yellow"
+        elif 32 <= h < 85:  # Green (wider range, starts earlier)
             return "green"
         elif 100 <= h < 130:
             return "blue"
@@ -315,9 +417,9 @@ class RingDetectorV2(Node):
                 return "red"
             elif 10 <= h < 20:  # Orange-red
                 return "orange"
-            elif 20 <= h < 40:  # Yellow
+            elif 20 <= h < 32:  # Yellow (narrower to avoid green confusion)
                 return "yellow"
-            elif 40 <= h < 80:  # Green
+            elif 32 <= h < 85:  # Green (wider range, starts earlier)
                 return "green"
             elif 100 <= h < 130:  # Blue
                 return "blue"
@@ -328,9 +430,10 @@ class RingDetectorV2(Node):
             self.get_logger().warn(f"Failed to classify PC RGB: {e}")
             return "unknown"
 
-    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch):
+    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch, radius):
         """
-        Publish raw detection to /ring_marker using 3D position and color from point cloud.
+        Publish raw detection to /ring_marker using 3D position and color from image.
+        Uses disparity mask to extract color from within the ring boundary (most reliable).
         Ring_localizator will aggregate 10+ detections in 0.6m radius for confirmation.
         Only publishes if robot is in IDLE or PATROL state.
         """
@@ -344,49 +447,35 @@ class RingDetectorV2(Node):
         # Get 3D position from point cloud (accurate, in base_link frame)
         x, y, z = depth_m, 0.0, 0.0  # Fallback to simple depth
         used_pointcloud = False
-        pc_rgb = None  # RGB value from point cloud at this location
+        
         if self.pointcloud_xyz is not None:
             try:
-                # Try center first, then search nearby for valid point (rings are hollow, need rim data)
-                neighbors = [
+                # Get 3D position from center or nearby points
+                neighbors_for_position = [
                     (cy, cx),  # center
                     (cy, cx + 10),  # right
                     (cy, cx - 10),  # left
                     (cy + 10, cx),  # down
                     (cy - 10, cx),  # up
-                    (cy + 10, cx + 10),  # down-right
-                    (cy - 10, cx - 10),  # up-left
                 ]
                 
-                for ny, nx in neighbors:
-                    # Clamp pixel coordinates to valid range
+                for ny, nx in neighbors_for_position:
                     ny_clamped = max(0, min(ny, self.pointcloud_xyz.shape[0] - 1))
                     nx_clamped = max(0, min(nx, self.pointcloud_xyz.shape[1] - 1))
                     pt = self.pointcloud_xyz[int(ny_clamped), int(nx_clamped), :]
                     
-                    # Use first valid point found (not NaN/Inf)
                     if np.all(np.isfinite(pt)):
                         x, y, z = pt[0], pt[1], pt[2]
                         used_pointcloud = True
-                        
-                        # Also get RGB from point cloud if available
-                        if self.pointcloud_rgb is not None:
-                            rgb_val = self.pointcloud_rgb[int(ny_clamped), int(nx_clamped)]
-                            pc_rgb = rgb_val
                         break
                         
             except Exception as e:
                 self.get_logger().debug(f"Failed to get point cloud position: {e}")
 
-        # Classify color: prefer point cloud RGB, fall back to image patch
-        colour = "unknown"
-        if pc_rgb is not None:
-            colour = self._classify_colour_from_pc_rgb(pc_rgb)
-            self.get_logger().info(f"[PC-RGB] Color: {colour} (raw={pc_rgb})")
-        elif ring_patch is not None and ring_patch.size > 0:
-            colour = self._classify_ring_colour(ring_patch)
-            self.get_logger().info(f"[Image] Color: {colour}")
-        
+        # Extract color from within the ring boundary using the image
+        # This is more reliable than point cloud samples because we know the ring pixels
+        colour = self._extract_ring_colour_from_image(cx, cy, radius, self.rgb_image)
+
         r, g, b = MARKER_COLOURS.get(colour, (0.5, 0.5, 0.5))
 
         marker = Marker()

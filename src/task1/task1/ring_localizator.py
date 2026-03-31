@@ -16,9 +16,9 @@ import math
 from collections import Counter
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-CLUSTER_RADIUS   = 0.5    # m — detections within this radius → same ring
-CONFIRM_THRESH   = 10     # detections needed to confirm a ring
-MIN_MARK_DIST    = 0.5    # m — minimum distance between two confirmed rings
+CLUSTER_RADIUS   = 1.3    # m — detections within this radius → same ring
+CONFIRM_THRESH   = 8      # detections needed to confirm a ring
+MIN_MARK_DIST    = 1.3    # m — minimum distance between two confirmed rings
 MAX_RAW_PTS      = 500    # max points stored per cluster before trimming
 
 SENSOR_QOS = QoSProfile(

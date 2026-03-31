@@ -56,6 +56,10 @@ class BehaviorManager(Node):
         self.interaction_end_time = None
         self.interaction_duration = 2.5
 
+        # Approach timeout: auto-enter interact if not reached in 15 seconds
+        self.approach_start_time = None
+        self.approach_timeout = 15.0  # seconds
+
         self.face_lines = [
             "Hello there. I come in peace.",
             "Greetings, human.",
@@ -275,6 +279,25 @@ class BehaviorManager(Node):
                 self.finish_interaction()
             return
 
+        # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
+        # This is a FAILSAFE that cancels the stuck nav goal and forces interaction to start
+        if self.approach_start_time is not None and self.active_target is not None:
+            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING') and self.nav_goal_type in ('approach_face', 'approach_ring'):
+                elapsed = (self.get_clock().now().nanoseconds - self.approach_start_time) / 1e9
+                if elapsed >= self.approach_timeout:
+                    self.get_logger().warn(
+                        f'Approach timeout ({self.approach_timeout}s) reached. Cancelling stuck goal and entering interact.')
+                    self.approach_start_time = None
+                    # Cancel the stuck navigation goal
+                    self.cancel_temporary_goal()
+                    # Gracefully transition to interact - use same interaction flow as normal
+                    if self.current_state == 'APPROACH_FACE':
+                        self.publish_state('INTERACT_FACE')
+                    else:  # APPROACH_RING
+                        self.publish_state('INTERACT_RING')
+                    self.start_interaction()
+                    # Do NOT return - let normal interaction logic proceed
+
         if self.result_future is None:
             return
 
@@ -294,6 +317,7 @@ class BehaviorManager(Node):
         self.goal_handle = None
         self.result_future = None
         self.nav_goal_type = None
+        self.approach_start_time = None  # Clear approach timeout
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             if nav_goal_type == 'approach_face':
@@ -348,7 +372,7 @@ class BehaviorManager(Node):
         if dist < 0.05:
             return None
 
-        offset = 0.6
+        offset = 0.8
         if dist <= offset:
             goal_x = robot_x
             goal_y = robot_y
@@ -430,6 +454,7 @@ class BehaviorManager(Node):
         self.goal_handle = None
         self.result_future = None
         self.nav_goal_type = None
+        self.approach_start_time = None  # Reset timer when goal is cancelled
 
     def refresh_state(self, force_publish=False):
         if self.manual_control_active:
@@ -517,6 +542,9 @@ class BehaviorManager(Node):
             self.saved_patrol_pose = None
             self.refresh_state()
             return
+
+        # Start approach timeout: auto-transition to interact after 15 seconds (fresh timer for this approach)
+        self.approach_start_time = self.get_clock().now().nanoseconds
 
         self.refresh_state()
 

@@ -22,12 +22,12 @@ def generate_launch_description():
     )
 
     # Simple waypoint navigator node from task1 package
-    # simple_waypoints_nav_node = Node(
-    #     package='task1',
-    #     executable='simple_waypoints_nav',
-    #     name='simple_waypoints_nav',
-    #     output='screen',
-    # )
+    simple_waypoints_nav_node = Node(
+        package='task1',
+        executable='simple_waypoints_nav',
+        name='simple_waypoints_nav',
+        output='screen',
+    )
 
     # Create launch description and add all nodes
     ld = LaunchDescription([
