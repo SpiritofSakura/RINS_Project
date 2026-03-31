@@ -121,8 +121,6 @@ class RingDetectorV2(Node):
         cv2.namedWindow("Disparity", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Hough Circles", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Masked view", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Color+Disparity Mask", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Combined: Ring + Color+Disparity", cv2.WINDOW_NORMAL)
         
         # Store combined mask for color extraction
         self.combined_mask = None
@@ -250,6 +248,7 @@ class RingDetectorV2(Node):
         cv2.imshow("Disparity", disparity_8u)
         cv2.imshow("Hough Circles", debug_img)
         cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
+        cv2.imshow("Masked view", cv2.cvtColor(combined_visualization, cv2.COLOR_GRAY2BGR))
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
