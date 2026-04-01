@@ -372,7 +372,7 @@ class BehaviorManager(Node):
         if dist < 0.05:
             return None
 
-        offset = 0.8
+        offset = 1.5
         if dist <= offset:
             goal_x = robot_x
             goal_y = robot_y
