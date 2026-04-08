@@ -50,7 +50,7 @@ class FaceLocalizator(Node):
 
             transform = self.tf_buffer.lookup_transform(
                 'map',
-                'base_link',
+                marker_msg.header.frame_id.lstrip('/'),
                 rclpy.time.Time()
             )
 

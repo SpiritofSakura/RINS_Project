@@ -1,0 +1,1 @@
+ros2 launch turtlebot4_navigation localization.launch.py map:=/home/zeta/RINS_Project/src/dis_tutorial3/maps/map_name.yaml

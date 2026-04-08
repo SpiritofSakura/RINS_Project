@@ -13,32 +13,23 @@ def generate_launch_description():
 
     real_robot = LaunchConfiguration('real_robot')
 
-    detect_rings_node = Node(
-        package='task1',
-        executable='detect_rings_v2',
-        name='detect_rings_v2',
+    detect_people_node = Node(
+        package='dis_tutorial3',
+        executable='detect_people.py',
+        name='detect_people',
         output='screen',
         parameters=[{'real_robot': real_robot}],
     )
 
-    ring_localizator_node = Node(
+    face_localizator_node = Node(
         package='task1',
-        executable='ring_localizator',
-        name='ring_localizator',
-        output='screen',
-        parameters=[{'real_robot': real_robot}],
-    )
-
-    simple_waypoints_nav_node = Node(
-        package='task1',
-        executable='simple_waypoints_nav',
-        name='simple_waypoints_nav',
+        executable='face_localizator',
+        name='face_localizator',
         output='screen',
     )
 
     return LaunchDescription([
         real_robot_arg,
-        detect_rings_node,
-        ring_localizator_node,
-        # simple_waypoints_nav_node,
+        detect_people_node,
+        face_localizator_node,
     ])

@@ -16,10 +16,11 @@ import math
 from collections import Counter
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-CLUSTER_RADIUS   = 0.7    # m — detections within this radius → same ring
-CONFIRM_THRESH   = 7      # detections needed to confirm a ring
-MIN_MARK_DIST    = 0.7    # m — minimum distance between two confirmed rings
-MAX_RAW_PTS      = 500    # max points stored per cluster before trimming
+CLUSTER_RADIUS        = 0.7    # m — detections within this radius → same ring
+CONFIRM_THRESH        = 7      # detections needed to confirm a ring (sim)
+CONFIRM_THRESH_REAL   = 20     # stricter for real robot — filters noisy false positives
+MIN_MARK_DIST         = 0.7    # m — minimum distance between two confirmed rings
+MAX_RAW_PTS           = 500    # max points stored per cluster before trimming
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -84,6 +85,10 @@ class RingLocalizator(Node):
     def __init__(self):
         super().__init__('ring_localizator')
 
+        self.declare_parameter('real_robot', False)
+        real = self.get_parameter('real_robot').get_parameter_value().bool_value
+        self.confirm_thresh = CONFIRM_THRESH_REAL if real else CONFIRM_THRESH
+
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -103,8 +108,8 @@ class RingLocalizator(Node):
         self.marker_id_counter = 0
 
         self.get_logger().info(
-            f"RingLocalizator ready — "
-            f"cluster_r={CLUSTER_RADIUS} m, confirm={CONFIRM_THRESH} detections")
+            f"{'[REAL]' if real else '[SIM]'} RingLocalizator ready — "
+            f"cluster_r={CLUSTER_RADIUS} m, confirm={self.confirm_thresh} detections")
 
     # ──────────────────────────────────────────────────────────────────────────
     def colour_callback(self, msg: String):
@@ -117,8 +122,9 @@ class RingLocalizator(Node):
             y_bl = marker_msg.pose.position.y
             z_bl = marker_msg.pose.position.z
 
+            source_frame = marker_msg.header.frame_id.lstrip('/')
             tf = self.tf_buffer.lookup_transform(
-                'map', 'base_link', rclpy.time.Time())
+                'map', source_frame, rclpy.time.Time())
             x, y, z = self._transform_point(x_bl, y_bl, z_bl, tf)
 
         except tf2_ros.TransformException as ex:
@@ -145,7 +151,7 @@ class RingLocalizator(Node):
             best.add(x, y, z, colour)
 
         # Check for confirmation
-        if best.count >= CONFIRM_THRESH and not best.confirmed:
+        if best.count >= self.confirm_thresh and not best.confirmed:
             self._try_confirm(best)
 
     # ──────────────────────────────────────────────────────────────────────────

@@ -34,20 +34,20 @@ SENSOR_QOS = QoSProfile(
 HOUGH_DP = 1                    # Inverse ratio of accumulator resolution
 HOUGH_MIN_DIST = 40             # Minimum distance between circle centres
 HOUGH_PARAM1 = 48               # Upper threshold for Canny edge (balanced strictness)
-HOUGH_PARAM2 = 25               # Accumulator threshold (strict but allows real rings)
-HOUGH_MIN_RADIUS = 1          # Minimum circle radius in pixels (lowered to detect black ring)
-HOUGH_MAX_RADIUS = 70          # Maximum circle radius (px)
+HOUGH_PARAM2 = 25               # Accumulator threshold (sim)
+HOUGH_PARAM2_REAL = 30          # Accumulator threshold (real robot)
+HOUGH_MIN_RADIUS = 1            # Minimum circle radius in pixels (lowered to detect black ring)
+HOUGH_MAX_RADIUS = 70           # Maximum circle radius (px)
 
-# ── Cross-frame confirmation ──────────────────────────────────────────────────
-CONFIRM_HITS = 8               # frames a ring must be seen before confirmed (strict but fair)
-MAX_MISSED = 4                  # frames without match before dropping candidate (balanced)
+# ── Cross-frame confirmation (handled by ring_localizator) ────────────────────
+MAX_MISSED    = 4               # frames without match before dropping candidate
 MATCH_DIST_PX = 35              # pixel radius to match circles between frames
 
 # ── Depth verification ────────────────────────────────────────────────────────
 MAX_RANGE_M = 7.0               # beyond this → "nothing" / sky
 RIM_SOLID_FRAC = 0.35           # fraction of rim samples that must be solid
 
-# ── Colour HSV ranges (from detect_rings.py) ──────────────────────────────────
+# ── Colour HSV ranges (simulation) ────────────────────────────────────────────
 COLOUR_RANGES = {
     "red": [
         (np.array([0,   130,  60]), np.array([10,  255, 255])),
@@ -67,6 +67,29 @@ COLOUR_RANGES = {
     ],
     "black": [
         (np.array([0, 0, 0]), np.array([180, 255, 50])),
+    ],
+}
+
+# ── Colour HSV ranges (real robot — looser S/V for real-world lighting) ────────
+COLOUR_RANGES_REAL = {
+    "red": [
+        (np.array([0,   60,  40]), np.array([10,  255, 255])),
+        (np.array([165, 60,  40]), np.array([180, 255, 255])),
+    ],
+    "green": [
+        (np.array([35,  50,  30]), np.array([90, 255, 255])),
+    ],
+    "blue": [
+        (np.array([95,  50,  30]), np.array([145, 255, 255])),
+    ],
+    "yellow": [
+        (np.array([18,  60,  60]), np.array([38, 255, 255])),
+    ],
+    "orange": [
+        (np.array([8,   80,  50]), np.array([22, 255, 255])),
+    ],
+    "black": [
+        (np.array([0, 0, 0]), np.array([180, 255, 60])),
     ],
 }
 
@@ -91,25 +114,55 @@ class RingDetectorV2(Node):
         self.depth_raw = None
         self.rgb_image = None
         self.image_header = None  # Store image header for marker timestamps
-        self.pointcloud_xyz = None  # Point cloud XYZ positions
-        self.pointcloud_rgb = None  # Point cloud RGB colors
+        self.pointcloud_xyz = None        # Point cloud XYZ positions
+        self.pointcloud_rgb = None        # Point cloud RGB colors
+        self.pointcloud_frame_id = 'base_link'  # overwritten from first PC message
 
         # Robot state for conditional publishing
         self.robot_state = 'IDLE'
 
         # Cross-frame candidates: list of {cx, cy, hits, missed, colour, depth_m}
         self._candidates = []
-        
+
         # Marker ID counter
         self.marker_id_counter = 0
 
+        # Topic selection: real robot vs simulation
+        self.declare_parameter('real_robot', False)
+        real = self.get_parameter('real_robot').get_parameter_value().bool_value
+
+        if real:
+            img_topic   = '/gemini/color/image_raw'
+            depth_topic = '/gemini/depth/image_raw'
+            pc_topic    = '/gemini/depth/points'
+        else:
+            img_topic   = '/oakd/rgb/preview/image_raw'
+            depth_topic = '/oakd/rgb/preview/depth'
+            pc_topic    = '/oakd/rgb/preview/depth/points'
+
+        self.real_robot = real
+
+        # Real robot: camera intrinsics for depth back-projection
+        self.camera_intrinsics = None   # (fx, fy, ppx, ppy)
+        self.camera_frame_id   = 'base_link'
+
+        self.get_logger().info(
+            f"{'[REAL]' if real else '[SIM]'} "
+            f"image={img_topic}  depth={depth_topic}  pc={pc_topic}")
+
         # Subscriptions
         self.image_sub = self.create_subscription(
-            Image, "/oakd/rgb/preview/image_raw", self.image_callback, SENSOR_QOS)
+            Image, img_topic, self.image_callback, SENSOR_QOS)
         self.depth_sub = self.create_subscription(
-            Image, "/oakd/rgb/preview/depth", self.depth_callback, SENSOR_QOS)
+            Image, depth_topic, self.depth_callback, SENSOR_QOS)
         self.pointcloud_sub = self.create_subscription(
-            PointCloud2, "/oakd/rgb/preview/depth/points", self.pointcloud_callback, SENSOR_QOS)
+            PointCloud2, pc_topic, self.pointcloud_callback, SENSOR_QOS)
+
+        if real:
+            from sensor_msgs.msg import CameraInfo
+            self.camera_info_sub = self.create_subscription(
+                CameraInfo, '/gemini/color/camera_info',
+                self._real_camera_info_callback, 10)
         self.robot_state_sub = self.create_subscription(
             String, "/robot_state", self.robot_state_callback, 10)
 
@@ -129,9 +182,20 @@ class RingDetectorV2(Node):
 
     def depth_callback(self, data):
         try:
-            self.depth_raw = self.bridge.imgmsg_to_cv2(data, "16UC1")
-        except CvBridgeError:
-            return
+            img = self.bridge.imgmsg_to_cv2(data, desired_encoding='passthrough')
+            # Normalise to uint16 mm regardless of what the camera sends
+            if img.dtype == np.float32 or img.dtype == np.float64:
+                # metres → millimetres
+                self.depth_raw = (img * 1000.0).astype(np.uint16)
+            else:
+                self.depth_raw = img.astype(np.uint16)
+            if not hasattr(self, '_depth_encoding_logged'):
+                self.get_logger().info(
+                    f"Depth encoding: {data.encoding}  dtype: {img.dtype}  "
+                    f"shape: {img.shape}")
+                self._depth_encoding_logged = True
+        except CvBridgeError as e:
+            self.get_logger().error(f"depth_callback CvBridgeError: {e}", throttle_duration_sec=5.0)
 
     def pointcloud_callback(self, data):
         """Store point cloud XYZ and RGB for accurate 3D position and color lookup."""
@@ -148,6 +212,7 @@ class RingDetectorV2(Node):
                 self.get_logger().error(f"Point cloud XYZ empty or None")
                 return
             self.pointcloud_xyz = pts_xyz.reshape((data.height, data.width, 3))
+            self.pointcloud_frame_id = data.header.frame_id.lstrip('/')
             
             # Try to extract RGB field
             pts_rgb = None
@@ -176,6 +241,10 @@ class RingDetectorV2(Node):
         self.image_header = data.header
 
         if self.depth_raw is None or self.rgb_image is None:
+            self.get_logger().warn(
+                f"Waiting for data: depth={'ok' if self.depth_raw is not None else 'MISSING'}  "
+                f"rgb={'ok' if self.rgb_image is not None else 'MISSING'}",
+                throttle_duration_sec=3.0)
             return
 
         # Convert depth to disparity (inverse, normalized)
@@ -185,29 +254,50 @@ class RingDetectorV2(Node):
         disparity_8u = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         disparity_8u = cv2.GaussianBlur(disparity_8u, (5, 5), 0)
 
-        # Also compute disparity mask once for later use
+        # Disparity mask: pixels with valid depth
         disparity_mask = (disparity > 0).astype(np.uint8) * 255
+
+        if self.real_robot:
+            # ── REAL ROBOT: colour-mask the disparity before Hough ───────────
+            # Build a combined HSV colour mask covering all ring colours
+            hsv = cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2HSV)
+            colour_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
+            for ranges in COLOUR_RANGES_REAL.values():
+                for lo, hi in ranges:
+                    colour_mask |= cv2.inRange(hsv, lo, hi)
+            # Close small gaps (pole occlusion etc.)
+            colour_mask = cv2.morphologyEx(
+                colour_mask, cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+            # Only keep disparity pixels that sit on a coloured region
+            hough_input = cv2.bitwise_and(disparity_8u, disparity_8u, mask=colour_mask)
+            param2 = HOUGH_PARAM2_REAL
+        else:
+            # ── SIMULATION: run Hough on full disparity image ────────────────
+            hough_input = disparity_8u
+            colour_mask = None
+            param2 = HOUGH_PARAM2
 
         # Hough circle detection
         circles = cv2.HoughCircles(
-            disparity_8u,
+            hough_input,
             cv2.HOUGH_GRADIENT,
             dp=HOUGH_DP,
             minDist=HOUGH_MIN_DIST,
             param1=HOUGH_PARAM1,
-            param2=HOUGH_PARAM2,
+            param2=param2,
             minRadius=HOUGH_MIN_RADIUS,
             maxRadius=HOUGH_MAX_RADIUS,
         )
-
-        # Compute disparity mask for later use
-        disparity_mask = (disparity > 0).astype(np.uint8) * 255
         
+        img_height = disparity_8u.shape[0]
         frame_detections = []
         if circles is not None:
             self.get_logger().info(f"Hough found {len(circles[0])} circles - publishing all")
             for circle in circles[0]:
                 cx, cy, radius = int(circle[0]), int(circle[1]), int(circle[2])
+                if self.real_robot and cy >= img_height // 2:
+                    continue  # on real robot, only detect rings in top half of image
                 ring = self._evaluate_circle(cx, cy, radius, depth_m, self.rgb_image, disparity_mask)
                 if ring is not None:
                     frame_detections.append(ring)
@@ -217,8 +307,9 @@ class RingDetectorV2(Node):
         for detection in frame_detections:
             # Publish to /ring_marker (color will be inferred from patch mask)
             # Let ring_localizator handle aggregation and confirmation
-            self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'], 
-                                     detection['ring_patch'], detection['radius'], detection['patch_mask'])
+            self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'],
+                                     detection['ring_patch'], detection['radius'], detection['patch_mask'],
+                                     colour_mask)
 
         # Debug visualization
         debug_img = self.rgb_image.copy()
@@ -227,10 +318,13 @@ class RingDetectorV2(Node):
         if circles is not None:
             for circle in circles[0]:
                 cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
-                cv2.circle(debug_img, (cx, cy), r, (0, 255, 0), 2)
-                cv2.circle(debug_img, (cx, cy), 2, (0, 0, 255), 3)
-                # Create mask for detected rings
-                cv2.circle(ring_mask, (cx, cy), r, 255, -1)
+                filtered_out = self.real_robot and cy >= img_height // 2
+                colour = (0, 0, 255) if filtered_out else (0, 255, 0)
+                cv2.circle(debug_img, (cx, cy), r, colour, 2)
+                cv2.circle(debug_img, (cx, cy), 2, colour, 3)
+                # Create mask only for circles that passed the filter
+                if not filtered_out:
+                    cv2.circle(ring_mask, (cx, cy), r, 255, -1)
         
         # Dilate ring mask by 20% (to expand ring boundaries)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -249,6 +343,8 @@ class RingDetectorV2(Node):
         cv2.imshow("Hough Circles", debug_img)
         cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
         cv2.imshow("Masked view", combined_visualization)
+        if self.real_robot and colour_mask is not None:
+            cv2.imshow("Colour mask (real)", cv2.cvtColor(colour_mask, cv2.COLOR_GRAY2BGR))
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
@@ -539,7 +635,59 @@ class RingDetectorV2(Node):
             self.get_logger().warn(f"Failed to classify PC RGB: {e}")
             return "unknown"
 
-    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch, radius, patch_mask):
+    def _real_camera_info_callback(self, data):
+        """Store camera intrinsics and frame_id once."""
+        if self.camera_intrinsics is None:
+            self.camera_intrinsics = (data.k[0], data.k[4], data.k[2], data.k[5])
+            self.camera_frame_id   = data.header.frame_id.lstrip('/')
+            self.get_logger().info(
+                f"[REAL] Camera intrinsics: fx={data.k[0]:.1f} fy={data.k[4]:.1f} "
+                f"cx={data.k[2]:.1f} cy={data.k[5]:.1f}  frame={self.camera_frame_id}")
+
+    def _real_get_3d_from_colour_mask(self, cx, cy, radius, colour_mask):
+        """
+        Back-project the ring to 3D using depth pixels that are:
+          - inside the ring's circle area
+          - coloured (on the colour mask) → guaranteed ring material, not hollow
+        Returns (x, y, z) in camera frame, or None if not enough valid pixels.
+        """
+        if self.depth_raw is None or self.camera_intrinsics is None or colour_mask is None:
+            return None
+
+        dh, dw = self.depth_raw.shape[:2]
+        ih, iw = colour_mask.shape[:2]
+
+        # Build a filled circle mask in image space
+        circle_mask = np.zeros((ih, iw), dtype=np.uint8)
+        cv2.circle(circle_mask, (cx, cy), radius, 255, -1)
+
+        # Intersect with colour mask → only ring-coloured pixels inside the circle
+        ring_pixels_mask = cv2.bitwise_and(circle_mask, colour_mask)
+
+        ys, xs = np.where(ring_pixels_mask > 0)
+        if len(ys) == 0:
+            return None
+
+        fx, fy, ppx, ppy = self.camera_intrinsics
+        valid_pts = []
+        for px, py in zip(xs, ys):
+            # Scale to depth image coords if resolutions differ
+            dx = int(np.clip(px * dw / iw, 0, dw - 1))
+            dy = int(np.clip(py * dh / ih, 0, dh - 1))
+            raw = self.depth_raw[dy, dx]
+            z = float(raw) / 1000.0 if self.depth_raw.dtype == np.uint16 else float(raw)
+            if z > 0.1 and np.isfinite(z):
+                x3d = (px - ppx) * z / fx
+                y3d = (py - ppy) * z / fy
+                valid_pts.append((x3d, y3d, z))
+
+        if len(valid_pts) < 5:
+            return None
+
+        arr = np.array(valid_pts)
+        return float(np.median(arr[:, 0])), float(np.median(arr[:, 1])), float(np.median(arr[:, 2]))
+
+    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch, radius, patch_mask, colour_mask=None):
         """
         Publish raw detection to /ring_marker using 3D position and color from image.
         Uses patch_mask to extract color from only the valid ring pixels (filters grey holder).
@@ -553,37 +701,45 @@ class RingDetectorV2(Node):
         if self.image_header is None:
             return
 
-        # Get 3D position from point cloud (accurate, in base_link frame)
+        # Get 3D position — real robot uses depth image + colour mask,
+        # sim uses the organized point cloud rim samples.
         x, y, z = None, None, None
-        used_pointcloud = False
-        
-        if self.pointcloud_xyz is not None:
-            try:
-                # Get 3D position from center or nearby points
-                neighbors_for_position = [
-                    (cy, cx),  # center
-                    (cy, cx + 10),  # right
-                    (cy, cx - 10),  # left
-                    (cy + 10, cx),  # down
-                    (cy - 10, cx),  # up
-                ]
-                
-                for ny, nx in neighbors_for_position:
-                    ny_clamped = max(0, min(ny, self.pointcloud_xyz.shape[0] - 1))
-                    nx_clamped = max(0, min(nx, self.pointcloud_xyz.shape[1] - 1))
-                    pt = self.pointcloud_xyz[int(ny_clamped), int(nx_clamped), :]
-                    
-                    if np.all(np.isfinite(pt)):
-                        x, y, z = pt[0], pt[1], pt[2]
-                        used_pointcloud = True
-                        break
-                        
-            except Exception as e:
-                self.get_logger().debug(f"Failed to get point cloud position: {e}")
 
-        # Reject detection if no valid 3D position found - don't publish false positives
+        if self.real_robot:
+            # ── REAL: back-project coloured ring pixels from depth image ─────
+            result = self._real_get_3d_from_colour_mask(cx, cy, radius, colour_mask)
+            if result is not None:
+                x, y, z = result
+            marker_frame = self.camera_frame_id
+        else:
+            # ── SIM: sample rim in organized point cloud ──────────────────────
+            if self.pointcloud_xyz is not None:
+                try:
+                    pc_h, pc_w = self.pointcloud_xyz.shape[:2]
+                    rim_pts = []
+                    for k in range(12):
+                        angle = 2 * np.pi * k / 12
+                        rx = int(np.clip(cx + radius * np.cos(angle), 0, pc_w - 1))
+                        ry = int(np.clip(cy + radius * np.sin(angle), 0, pc_h - 1))
+                        pt = self.pointcloud_xyz[ry, rx, :]
+                        if np.all(np.isfinite(pt)) and np.any(pt != 0):
+                            rim_pts.append(pt)
+                    if len(rim_pts) >= 3:
+                        rim_arr = np.array(rim_pts)
+                        x = float(np.median(rim_arr[:, 0]))
+                        y = float(np.median(rim_arr[:, 1]))
+                        z = float(np.median(rim_arr[:, 2]))
+                except Exception as e:
+                    self.get_logger().debug(f"Failed to get rim point cloud position: {e}")
+            marker_frame = self.pointcloud_frame_id
 
         if x is None or y is None or z is None:
+            return
+
+        # Reject detections too far from the robot (depth unreliable at range)
+        dist = float(np.sqrt(x**2 + y**2 + z**2))
+        if self.real_robot and dist > 2.0:
+            self.get_logger().debug(f"Ring too far ({dist:.2f} m), skipping")
             return
 
         # Extract color from ring patch using the mask (filters out grey holder)
@@ -593,7 +749,7 @@ class RingDetectorV2(Node):
         r, g, b = MARKER_COLOURS.get(colour, (0.5, 0.5, 0.5))
 
         marker = Marker()
-        marker.header.frame_id = "base_link"
+        marker.header.frame_id = marker_frame
         marker.header.stamp = self.image_header.stamp  # Use image timestamp, not clock
         marker.type = Marker.CYLINDER
         marker.id = self.marker_id_counter  # Incrementing ID like face detector
@@ -615,8 +771,7 @@ class RingDetectorV2(Node):
         marker.color.a = 1.0
 
         self.marker_pub.publish(marker)
-        pc_str = "from point cloud" if used_pointcloud else "fallback"
-        self.get_logger().info(f"Published /ring_marker: id={marker.id}, pos=({x:.2f}, {y:.2f}, {z:.2f}) {pc_str}, colour={colour}")
+        self.get_logger().info(f"Published /ring_marker: id={marker.id}, pos=({x:.2f}, {y:.2f}, {z:.2f}), colour={colour}")
 
     def _publish_marker(self, ring):
         """Publish confirmed ring marker. Only publishes if robot is in IDLE or PATROL state."""
