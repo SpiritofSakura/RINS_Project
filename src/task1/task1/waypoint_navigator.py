@@ -67,8 +67,11 @@ class WaypointNavigator(Node):
         self.objavi_koncanost(False)
 
     def nalozi_tocke(self):
+        self.declare_parameter('waypoints_file', 'waypoints.yaml')
+        ime_datoteke = self.get_parameter('waypoints_file').get_parameter_value().string_value
+
         pot_paketa = get_package_share_directory('task1')
-        pot_yaml = os.path.join(pot_paketa, 'config', 'waypoints.yaml')
+        pot_yaml = os.path.join(pot_paketa, 'config', ime_datoteke)
 
         if not os.path.exists(pot_yaml):
             self.get_logger().error(f'YAML datoteka ne obstaja: {pot_yaml}')

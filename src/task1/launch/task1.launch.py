@@ -1,18 +1,29 @@
 from launch import LaunchDescription
-from launch.actions import TimerAction
+from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     """Launch the task1 application with all required nodes."""
-    
+
+    real_robot_arg = DeclareLaunchArgument(
+        'real_robot', default_value='false', choices=['true', 'false'],
+        description='Use real robot configuration (IRL waypoints, depth camera, etc.)'
+    )
+    real_robot = LaunchConfiguration('real_robot')
+
+    waypoints_file = PythonExpression([
+        "'irl-waypoints.yaml' if '", real_robot, "' == 'true' else 'waypoints.yaml'"
+    ])
+
     # Node from dis_tutorial3 package
     detect_people_node = Node(
         package='dis_tutorial3',
         executable='detect_people.py',
         name='detect_people',
         parameters=[
-            {'enabled': True},
+            {'enabled': True, 'real_robot': real_robot},
         ],
     )
     
@@ -37,6 +48,7 @@ def generate_launch_description():
         executable='ring_localizator',
         name='ring_localizator',
         output='screen',
+        parameters=[{'real_robot': real_robot}],
     )
 
 
@@ -50,6 +62,7 @@ def generate_launch_description():
         package='task1',
         executable='waypoint_navigator',
         name='waypoint_navigator',
+        parameters=[{'waypoints_file': waypoints_file}],
     )
 
     robot_state_overlay_node = Node(
@@ -72,6 +85,7 @@ def generate_launch_description():
     
     # Create launch description and add all nodes
     ld = LaunchDescription([
+        real_robot_arg,
         detect_people_node,
         face_localizator_node,
         robot_state_overlay_node,

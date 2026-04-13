@@ -19,6 +19,14 @@ from ultralytics import YOLO
 # from rclpy.parameter import Parameter
 # from rcl_interfaces.msg import SetParametersResult
 
+# ── Face detection tuning ────────────────────────────────────────────────────
+FACE_Y_FRAC        = 0.50  # bbox bottom edge must be below this fraction of image height
+                             # (rejects detections entirely above the border wall)
+FACE_CONFIRM_HITS  = 6      # frames a face must be seen before it is reported
+FACE_MAX_MISSED    = 8      # frames without a match before dropping a candidate
+FACE_MATCH_DIST_PX = 50     # pixel radius to match detections across frames
+FACE_DEPTH_STD_MAX = 0.20   # max depth std-dev (m) within bbox — flat-wall / picture check
+
 class detect_faces(Node):
 
 	def __init__(self):
@@ -74,9 +82,10 @@ class detect_faces(Node):
 
 		self.marker_pub = self.create_publisher(Marker, marker_topic, QoSReliabilityPolicy.BEST_EFFORT)
 
-		self.model = YOLO("yolov8n.pt")
+		self.model = YOLO("yolov8m.pt")
 
 		self.faces = []
+		self._face_candidates = []   # cross-frame accumulator
 
 		self.get_logger().info(f"Node has been initialized! Will publish face markers to {marker_topic}.")
 
@@ -87,43 +96,96 @@ class detect_faces(Node):
 		try:
 			cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
 			self.rgb_image = cv_image
+			img_h, img_w = cv_image.shape[:2]
 
-			#self.get_logger().info(f"Running inference on image...")
+			res = self.model.predict(cv_image, imgsz=640, conf=0.25, show=False, verbose=False, classes=[0], device=self.device)
 
-			# run inference
-			res = self.model.predict(cv_image, imgsz=(256, 320), show=False, verbose=False, classes=[0], device=self.device)
+			frame_detections = []
 
-			# iterate over results
 			for x in res:
 				bbox = x.boxes.xyxy
-				if bbox.nelement() == 0: # skip if empty
+				if bbox.nelement() == 0:
 					continue
 
-				self.get_logger().info(f"Person has been detected!")
-
 				bbox = bbox[0]
+				x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+				cx = int((x1 + x2) / 2)
+				cy = int((y1 + y2) / 2)
 
-				# draw rectangle
-				cv_image = cv2.rectangle(cv_image, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), self.detection_color, 3)
+				# Filter A: bbox bottom edge must reach the lower portion of the image.
+				# Detections entirely above the border wall are rejected here.
+				accepted = y2 >= int(img_h * FACE_Y_FRAC)
 
-				cx = int((bbox[0]+bbox[2])/2)
-				cy = int((bbox[1]+bbox[3])/2)
+				colour = (0, 255, 0) if accepted else (0, 0, 255)
+				cv_image = cv2.rectangle(cv_image, (x1, y1), (x2, y2), colour, 3)
+				cv_image = cv2.circle(cv_image, (cx, cy), 5, colour, -1)
 
-				# draw the center of bounding box
-				cv_image = cv2.circle(cv_image, (cx,cy), 5, self.detection_color, -1)
+				if not accepted:
+					continue
 
-				self.faces.append((cx,cy))
+				frame_detections.append((cx, cy, x1, y1, x2, y2))
+
+			# Filter C: cross-frame confirmation.
+			# A detection must appear in FACE_CONFIRM_HITS consecutive-ish frames
+			# before it is treated as a real face, killing single-frame false positives.
+			matched = set()
+			for det in frame_detections:
+				dcx, dcy = det[0], det[1]
+				best_idx, best_dist = None, FACE_MATCH_DIST_PX
+				for i, cand in enumerate(self._face_candidates):
+					d = np.hypot(cand['cx'] - dcx, cand['cy'] - dcy)
+					if d < best_dist:
+						best_dist, best_idx = d, i
+				if best_idx is not None:
+					self._face_candidates[best_idx]['hits']   += 1
+					self._face_candidates[best_idx]['missed']  = 0
+					self._face_candidates[best_idx]['cx']      = dcx
+					self._face_candidates[best_idx]['cy']      = dcy
+					self._face_candidates[best_idx]['det']     = det
+					matched.add(best_idx)
+				else:
+					self._face_candidates.append(
+						{'cx': dcx, 'cy': dcy, 'hits': 1, 'missed': 0, 'det': det})
+
+			for i in range(len(self._face_candidates) - 1, -1, -1):
+				if i not in matched:
+					self._face_candidates[i]['missed'] += 1
+				if self._face_candidates[i]['missed'] > FACE_MAX_MISSED:
+					self._face_candidates.pop(i)
+
+			self.faces = [c['det'] for c in self._face_candidates
+						  if c['hits'] >= FACE_CONFIRM_HITS]
+			if self.faces:
+				self.get_logger().info(f"Person confirmed in view ({len(self.faces)} face(s))")
 
 			cv2.imshow("image", cv_image)
+
+			# ── REAL ROBOT: show disparity window ────────────────────────
+			if self.real_robot and self.depth_image is not None:
+				depth_f = self.depth_image.astype(np.float32)
+				if self.depth_image.dtype == np.uint16:
+					depth_f = depth_f / 1000.0
+				with np.errstate(divide='ignore', invalid='ignore'):
+					disp = np.where(depth_f > 0, 1.0 / depth_f, 0)
+				disp_8u = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+				disp_bgr = cv2.cvtColor(disp_8u, cv2.COLOR_GRAY2BGR)
+				dh, dw = disp_bgr.shape[:2]
+				for (fx, fy, *_) in self.faces:
+					cv2.circle(disp_bgr,
+							   (int(fx * dw / img_w), int(fy * dh / img_h)),
+							   8, (0, 255, 0), 2)
+				cv2.imshow("Disparity (faces)", disp_bgr)
+
 			key = cv2.waitKey(1)
-			if key==27:
+			if key == 27:
 				print("exiting")
 				exit()
 
 			# ── REAL ROBOT: publish face markers from depth image ─────────
 			if self.real_robot:
-				for cx, cy in self.faces:
-					self._real_publish_face_marker(cx, cy)
+				for det in self.faces:
+					dcx, dcy, dx1, dy1, dx2, dy2 = det
+					self._real_publish_face_marker(dcx, dcy, dx1, dy1, dx2, dy2)
 
 		except CvBridgeError as e:
 			print(e)
@@ -152,26 +214,40 @@ class detect_faces(Node):
 				f'[REAL] Camera intrinsics: fx={fx:.1f} fy={fy:.1f} cx={ppx:.1f} cy={ppy:.1f} '
 				f'frame={self.camera_frame_id}')
 
-	def _real_publish_face_marker(self, cx, cy):
+	def _real_publish_face_marker(self, cx, cy, bbox_x1, bbox_y1, bbox_x2, bbox_y2):
 		"""Back-project face pixel to 3D using depth image and camera intrinsics."""
 		if self.depth_image is None or self.camera_intrinsics is None:
 			return
 
 		dh, dw = self.depth_image.shape[:2]
-
-		# Scale face pixel coords from colour image space to depth image space
-		# (they may have different resolutions)
 		colour_h, colour_w = self.rgb_image.shape[:2] if self.rgb_image is not None else (dh, dw)
-		dx = int(np.clip(cx * dw / colour_w, 0, dw - 1))
-		dy = int(np.clip(cy * dh / colour_h, 0, dh - 1))
 
-		# Sample a patch around the face centre and take the median of valid values
-		patch_r = 10
-		y0, y1 = max(0, dy - patch_r), min(dh, dy + patch_r + 1)
-		x0, x1 = max(0, dx - patch_r), min(dw, dx + patch_r + 1)
-		patch = self.depth_image[y0:y1, x0:x1].astype(np.float32).ravel()
+		def _scale_x(px): return int(np.clip(px * dw / colour_w, 0, dw - 1))
+		def _scale_y(py): return int(np.clip(py * dh / colour_h, 0, dh - 1))
 
-		# Gemini depth is uint16 in millimetres; 32F would already be metres
+		# Depth-uniformity check: faces are flat pictures on a wall, so depth
+		# across the whole bounding box should be nearly constant.
+		# High std-dev means different surfaces at different distances → not a flat face.
+		bbx1, bby1 = _scale_x(bbox_x1), _scale_y(bbox_y1)
+		bbx2, bby2 = _scale_x(bbox_x2), _scale_y(bbox_y2)
+		bbox_depth = self.depth_image[bby1:bby2 + 1, bbx1:bbx2 + 1].astype(np.float32).ravel()
+		if self.depth_image.dtype == np.uint16:
+			bbox_depth = bbox_depth / 1000.0
+		bbox_valid = bbox_depth[(bbox_depth > 0.1) & np.isfinite(bbox_depth)]
+		if len(bbox_valid) < 10:
+			return  # too few depth readings to evaluate
+		depth_std = float(np.std(bbox_valid))
+		if depth_std > FACE_DEPTH_STD_MAX:
+			self.get_logger().debug(
+				f"Depth not uniform (std={depth_std:.3f} m) — skipping")
+			return
+
+		# Back-project face centre to 3D
+		dx = _scale_x(cx)
+		dy = _scale_y(cy)
+		p_x0, p_x1 = max(0, dx - 10), min(dw, dx + 11)
+		p_y0, p_y1 = max(0, dy - 10), min(dh, dy + 11)
+		patch = self.depth_image[p_y0:p_y1, p_x0:p_x1].astype(np.float32).ravel()
 		if self.depth_image.dtype == np.uint16:
 			patch = patch / 1000.0
 
@@ -180,13 +256,16 @@ class detect_faces(Node):
 			return
 		z = float(np.median(valid))
 
-		fx, fy, ppx, ppy = self.camera_intrinsics
-		# Back-project using depth-image pixel coords scaled to depth intrinsics
-		x = (dx - ppx) * z / fx
-		y = (dy - ppy) * z / fy
+		cam_fx, cam_fy, ppx, ppy = self.camera_intrinsics
+		pt_x = (dx - ppx) * z / cam_fx
+		pt_y = (dy - ppy) * z / cam_fy
+
+		dist = float(np.sqrt(pt_x**2 + pt_y**2 + z**2))
+		if dist > 2.0:
+			self.get_logger().debug(f"Face too far ({dist:.2f} m), skipping")
+			return
 
 		marker = Marker()
-		# Publish in the camera optical frame — TF will handle the rest
 		marker.header.frame_id = self.camera_frame_id
 		marker.header.stamp = self.get_clock().now().to_msg()
 		marker.type = Marker.SPHERE
@@ -196,8 +275,8 @@ class detect_faces(Node):
 		marker.color.g = 1.0
 		marker.color.b = 1.0
 		marker.color.a = 1.0
-		marker.pose.position.x = x
-		marker.pose.position.y = y
+		marker.pose.position.x = pt_x
+		marker.pose.position.y = pt_y
 		marker.pose.position.z = z
 		self.marker_pub.publish(marker)
 
@@ -219,18 +298,18 @@ class detect_faces(Node):
 			return
 
 		# iterate over face coordinates
-		for x,y in self.faces:
+		for face_cx, face_cy, *_ in self.faces:
 
 			# get 3-channel representation of the point cloud in numpy format
 			a = pc2.read_points_numpy(data, field_names= ("x", "y", "z"))
 			a = a.reshape((height,width,3))
 
 			# clamp to valid range to avoid index errors
-			x = int(np.clip(x, 0, width - 1))
-			y = int(np.clip(y, 0, height - 1))
+			face_cx = int(np.clip(face_cx, 0, width - 1))
+			face_cy = int(np.clip(face_cy, 0, height - 1))
 
 			# read center coordinates
-			d = a[y,x,:]
+			d = a[face_cy, face_cx, :]
 
 			# create marker
 			marker = Marker()
