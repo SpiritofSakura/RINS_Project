@@ -171,9 +171,9 @@ class RingDetectorV2(Node):
         self.colour_pub = self.create_publisher(String, "/ring_colour", 10)
 
         # Debug windows
-        cv2.namedWindow("Disparity", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Hough Circles", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Masked view", cv2.WINDOW_NORMAL)
+        if self.real_robot:
+            cv2.namedWindow("Colour mask (real)", cv2.WINDOW_NORMAL)
         
         # Store combined mask for color extraction
         self.combined_mask = None
@@ -339,10 +339,7 @@ class RingDetectorV2(Node):
         # Combine ring mask with color+disparity mask to see intersection
         combined_visualization = cv2.bitwise_and(ring_mask, combined_mask_display)
 
-        cv2.imshow("Disparity", disparity_8u)
         cv2.imshow("Hough Circles", debug_img)
-        cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
-        cv2.imshow("Masked view", combined_visualization)
         if self.real_robot and colour_mask is not None:
             cv2.imshow("Colour mask (real)", cv2.cvtColor(colour_mask, cv2.COLOR_GRAY2BGR))
         cv2.waitKey(1)

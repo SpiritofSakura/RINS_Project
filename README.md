@@ -4,17 +4,63 @@
 - Ring Detection
 
 
-Za delovanje programa poženeš skripti v tem vrstnem redu:
-- server_sim.sh
-- run_sim.sh
+## Simulation
 
-odpre rviz in naloži vse mape.
+Run in this order:
+- `server_sim.sh`
+- `run_sim.sh`
 
-Z skripto:
-- kill_ros_processes.sh
-ustrezno zapremo delovanje programa.
+Opens RViz and loads all maps.
 
-start_slam.sh je da samo sam od sebe skeniraš mapo.
+To stop:
+- `kill_ros_processes.sh`
+
+To scan the map manually:
+- `start_slam.sh`
+
+---
+
+## Real World (IRL)
+
+### Requirements
+- TurtleBot4 powered on and connected to the same network
+- Map already built and saved at `src/dis_tutorial3/maps/map_name.yaml`
+- Robot placed at the designated starting position
+
+### First-time setup
+Record the robot's starting position once (after doing a manual 2D Pose Estimate in RViz):
+```bash
+ros2 topic echo /amcl_pose --once
+```
+Update `src/dis_tutorial3/config/localization_irl.yaml` with the `x`, `y` and `yaw` values.
+Yaw is computed from the quaternion: `yaw = 2 * arctan2(z, w)`.
+
+### Running
+
+**Terminal 1 — full stack (Nav2 + localization + RViz + task1):**
+```bash
+./real.sh
+```
+This opens a tmux session with 4 panes. Each pane starts with a delay so services come up in the right order. Wait until all panes are stable before starting patrol.
+
+Tmux tips: `Ctrl+B` + arrow keys to switch panes, `Ctrl+B` + `D` to detach without killing.
+
+**Terminal 2 — start patrol:**
+```bash
+./patrol.sh
+```
+
+### Adding/editing IRL waypoints
+Waypoints are stored in `src/task1/config/irl-waypoints.yaml`. Each entry:
+```yaml
+- x: 1.23
+  y: -0.45
+  yaw: -1.57   # 2 * arctan2(qz, qw) from /amcl_pose
+```
+Drive the robot to a position with teleop, then read the pose:
+```bash
+ros2 topic echo /amcl_pose --once
+```
 
 **DODAJANJE PAKETOV:**
 ros2 pkg create <naslov-paketa> --build-type ament_python --dependencies rclpy
