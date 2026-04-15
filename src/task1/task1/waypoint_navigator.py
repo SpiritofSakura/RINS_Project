@@ -11,7 +11,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from ament_index_python.packages import get_package_share_directory
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, Quaternion
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import Bool
 
@@ -21,6 +21,10 @@ def yaw_v_kvaternion(kot):
     kvaternion.z = math.sin(kot / 2.0)
     kvaternion.w = math.cos(kot / 2.0)
     return kvaternion
+
+
+def yaw_from_quaternion(q):
+    return 2.0 * math.atan2(q.z, q.w)
 
 
 class WaypointNavigator(Node):
@@ -42,6 +46,17 @@ class WaypointNavigator(Node):
         self.rocaj_cilja = None
         self.rezultat_prihodnost = None
 
+        # Stuck detection
+        self.goal_sent_time = None
+        self.stuck_timeout = 15.0
+        self.consecutive_rejects = 0
+        self.max_rejects = 10
+
+        # Recovery: navigate 30cm behind robot using Nav2
+        self.recovery_active = False
+        self.recovery_backup_dist = 0.20
+        self.current_pose = None
+
         qos_lat = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -49,17 +64,14 @@ class WaypointNavigator(Node):
         )
 
         self.sub_pat = self.create_subscription(
-            Bool,
-            '/patrol_enabled',
-            self.patrol_callback,
-            qos_lat
+            Bool, '/patrol_enabled', self.patrol_callback, qos_lat
         )
 
-        self.pub_kon = self.create_publisher(
-            Bool,
-            '/patrol_finished',
-            qos_lat
+        self.sub_pose = self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self.pose_callback, 10
         )
+
+        self.pub_kon = self.create_publisher(Bool, '/patrol_finished', qos_lat)
 
         self.casovnik = self.create_timer(0.2, self.zanka)
 
@@ -92,6 +104,9 @@ class WaypointNavigator(Node):
 
         return seznam_tock
 
+    def pose_callback(self, msg: PoseWithCovarianceStamped):
+        self.current_pose = msg.pose.pose
+
     def objavi_koncanost(self, stanje):
         msg = Bool()
         msg.data = stanje
@@ -115,7 +130,7 @@ class WaypointNavigator(Node):
 
     def preklici_cilj(self):
         if self.rocaj_cilja is not None and self.cilj_aktiven:
-            self.get_logger().info('Cancelling current patrol goal...')
+            self.get_logger().info('Cancelling current goal...')
             prihodnost = self.rocaj_cilja.cancel_goal_async()
             prihodnost.add_done_callback(self.obdelaj_preklic)
 
@@ -129,6 +144,63 @@ class WaypointNavigator(Node):
         self.cakanje_na_sprejem = False
         self.rocaj_cilja = None
         self.rezultat_prihodnost = None
+        self.goal_sent_time = None
+
+    def start_recovery(self):
+        if self.current_pose is None:
+            self.get_logger().warn('No AMCL pose yet — skipping waypoint instead of recovery.')
+            self.indeks_tocke += 1
+            return
+
+        yaw = yaw_from_quaternion(self.current_pose.orientation)
+        backup_x = self.current_pose.position.x - self.recovery_backup_dist * math.cos(yaw)
+        backup_y = self.current_pose.position.y - self.recovery_backup_dist * math.sin(yaw)
+
+        self.get_logger().warn(
+            f'Stuck — sending recovery goal 30cm back: ({backup_x:.2f}, {backup_y:.2f})'
+        )
+
+        self.recovery_active = True
+        self.cilj_aktiven = False
+        self.cakanje_na_sprejem = False
+        self.rocaj_cilja = None
+        self.rezultat_prihodnost = None
+        self.goal_sent_time = None
+
+        cilj = PoseStamped()
+        cilj.header.frame_id = 'map'
+        cilj.header.stamp = self.get_clock().now().to_msg()
+        cilj.pose.position.x = backup_x
+        cilj.pose.position.y = backup_y
+        cilj.pose.orientation = yaw_v_kvaternion(yaw)
+
+        sporocilo = NavigateToPose.Goal()
+        sporocilo.pose = cilj
+
+        self.cakanje_na_sprejem = True
+        prihodnost = self.akcijski_odjemalec.send_goal_async(sporocilo)
+        prihodnost.add_done_callback(self.obdelaj_sprejem_recovery)
+
+    def obdelaj_sprejem_recovery(self, prihodnost):
+        self.cakanje_na_sprejem = False
+
+        try:
+            rocaj_cilja = prihodnost.result()
+        except Exception as nap:
+            self.get_logger().error(f'Recovery goal error: {nap}')
+            self.recovery_active = False
+            return
+
+        if not rocaj_cilja.accepted:
+            self.get_logger().warn('Recovery goal rejected — skipping waypoint.')
+            self.recovery_active = False
+            self.indeks_tocke += 1
+            return
+
+        self.get_logger().info('Recovery goal accepted.')
+        self.rocaj_cilja = rocaj_cilja
+        self.cilj_aktiven = True
+        self.rezultat_prihodnost = rocaj_cilja.get_result_async()
 
     def zanka(self):
         if len(self.seznam_tock) == 0:
@@ -158,6 +230,17 @@ class WaypointNavigator(Node):
             self.objavi_koncanost(True)
             return
 
+        # Check if stuck on active patrol goal (not recovery)
+        if self.cilj_aktiven and not self.recovery_active and self.goal_sent_time is not None:
+            elapsed = (self.get_clock().now() - self.goal_sent_time).nanoseconds / 1e9
+            if elapsed > self.stuck_timeout:
+                self.get_logger().warn(
+                    f'Waypoint {self.indeks_tocke + 1} stuck for {elapsed:.1f}s — recovering.'
+                )
+                self.preklici_cilj()
+                self.start_recovery()
+                return
+
         if not self.cakanje_na_sprejem and not self.cilj_aktiven and self.rezultat_prihodnost is None:
             self.poslji_naslednjo_tocko()
             return
@@ -174,9 +257,21 @@ class WaypointNavigator(Node):
         self.cilj_aktiven = False
         self.rocaj_cilja = None
         self.rezultat_prihodnost = None
+        self.goal_sent_time = None
+
+        if self.recovery_active:
+            # Recovery goal finished
+            self.recovery_active = False
+            if status == GoalStatus.STATUS_SUCCEEDED:
+                self.get_logger().info('Recovery succeeded — retrying waypoint.')
+            else:
+                self.get_logger().warn(f'Recovery failed (status {status}) — skipping waypoint.')
+                self.indeks_tocke += 1
+            return
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info(f'Tocka {self.indeks_tocke + 1} dosezena.')
+            self.consecutive_rejects = 0
             self.indeks_tocke += 1
 
             if self.indeks_tocke >= len(self.seznam_tock):
@@ -186,14 +281,12 @@ class WaypointNavigator(Node):
             elif self.patrol_omogocen:
                 self.poslji_naslednjo_tocko()
 
-        elif status in (
-            GoalStatus.STATUS_CANCELED,
-            GoalStatus.STATUS_CANCELING,
-        ):
+        elif status in (GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_CANCELING):
             self.get_logger().info('Patrol goal cancelled.')
 
         else:
-            self.get_logger().error(f'Cilj ni uspel. Status: {status}')
+            self.get_logger().error(f'Cilj ni uspel (status {status}) — recovering.')
+            self.start_recovery()
 
     def poslji_naslednjo_tocko(self):
         if self.indeks_tocke >= len(self.seznam_tock):
@@ -202,6 +295,14 @@ class WaypointNavigator(Node):
             return
 
         if not self.patrol_omogocen:
+            return
+
+        if self.consecutive_rejects >= self.max_rejects:
+            self.get_logger().warn(
+                f'Waypoint {self.indeks_tocke + 1} rejected {self.consecutive_rejects} times — skipping.'
+            )
+            self.consecutive_rejects = 0
+            self.indeks_tocke += 1
             return
 
         tocka = self.seznam_tock[self.indeks_tocke]
@@ -224,6 +325,7 @@ class WaypointNavigator(Node):
         )
 
         self.cakanje_na_sprejem = True
+        self.goal_sent_time = self.get_clock().now()
         prihodnost = self.akcijski_odjemalec.send_goal_async(sporocilo)
         prihodnost.add_done_callback(self.obdelaj_sprejem)
 
@@ -237,9 +339,14 @@ class WaypointNavigator(Node):
             return
 
         if not rocaj_cilja.accepted:
-            self.get_logger().error(f'Tocka {self.indeks_tocke + 1} zavrnjena.')
+            self.consecutive_rejects += 1
+            self.get_logger().error(
+                f'Tocka {self.indeks_tocke + 1} zavrnjena ({self.consecutive_rejects}/{self.max_rejects}).'
+            )
+            self.goal_sent_time = None
             return
 
+        self.consecutive_rejects = 0
         self.get_logger().info(f'Tocka {self.indeks_tocke + 1} sprejeta.')
         self.rocaj_cilja = rocaj_cilja
         self.cilj_aktiven = True
