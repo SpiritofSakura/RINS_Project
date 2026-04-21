@@ -55,6 +55,8 @@ class WaypointNavigator(Node):
         # Recovery: navigate 30cm behind robot using Nav2
         self.recovery_active = False
         self.recovery_backup_dist = 0.20
+        self.recovery_sent_time = None
+        self.recovery_timeout = 10.0
         self.current_pose = None
 
         qos_lat = QoSProfile(
@@ -140,8 +142,11 @@ class WaypointNavigator(Node):
         except Exception as nap:
             self.get_logger().warn(f'Cancel request failed: {nap}')
 
+        # Skip reset if recovery was already started — it owns state now
+        if self.recovery_active or self.cakanje_na_sprejem:
+            return
+
         self.cilj_aktiven = False
-        self.cakanje_na_sprejem = False
         self.rocaj_cilja = None
         self.rezultat_prihodnost = None
         self.goal_sent_time = None
@@ -161,6 +166,7 @@ class WaypointNavigator(Node):
         )
 
         self.recovery_active = True
+        self.recovery_sent_time = self.get_clock().now()
         self.cilj_aktiven = False
         self.cakanje_na_sprejem = False
         self.rocaj_cilja = None
@@ -194,6 +200,7 @@ class WaypointNavigator(Node):
         if not rocaj_cilja.accepted:
             self.get_logger().warn('Recovery goal rejected — skipping waypoint.')
             self.recovery_active = False
+            self.recovery_sent_time = None
             self.indeks_tocke += 1
             return
 
@@ -241,6 +248,23 @@ class WaypointNavigator(Node):
                 self.start_recovery()
                 return
 
+        # Check if recovery itself is stuck — hard-reset and skip waypoint
+        if self.recovery_active and self.recovery_sent_time is not None:
+            elapsed_rec = (self.get_clock().now() - self.recovery_sent_time).nanoseconds / 1e9
+            if elapsed_rec > self.recovery_timeout:
+                self.get_logger().warn(
+                    f'Recovery stuck for {elapsed_rec:.1f}s — force-skipping waypoint {self.indeks_tocke + 1}.'
+                )
+                self.recovery_active = False
+                self.recovery_sent_time = None
+                self.cilj_aktiven = False
+                self.cakanje_na_sprejem = False
+                self.rocaj_cilja = None
+                self.rezultat_prihodnost = None
+                self.goal_sent_time = None
+                self.indeks_tocke += 1
+                return
+
         if not self.cakanje_na_sprejem and not self.cilj_aktiven and self.rezultat_prihodnost is None:
             self.poslji_naslednjo_tocko()
             return
@@ -262,6 +286,7 @@ class WaypointNavigator(Node):
         if self.recovery_active:
             # Recovery goal finished
             self.recovery_active = False
+            self.recovery_sent_time = None
             if status == GoalStatus.STATUS_SUCCEEDED:
                 self.get_logger().info('Recovery succeeded — retrying waypoint.')
             else:

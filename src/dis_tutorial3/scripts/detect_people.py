@@ -103,27 +103,27 @@ class detect_faces(Node):
 			frame_detections = []
 
 			for x in res:
-				bbox = x.boxes.xyxy
-				if bbox.nelement() == 0:
+				bboxes = x.boxes.xyxy
+				if bboxes.nelement() == 0:
 					continue
 
-				bbox = bbox[0]
-				x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-				cx = int((x1 + x2) / 2)
-				cy = int((y1 + y2) / 2)
+				for bbox in bboxes:
+					x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+					cx = int((x1 + x2) / 2)
+					cy = int((y1 + y2) / 2)
 
-				# Filter A: bbox bottom edge must reach the lower portion of the image.
-				# Detections entirely above the border wall are rejected here.
-				accepted = y2 >= int(img_h * FACE_Y_FRAC)
+					# Filter A: bbox bottom edge must reach the lower portion of the image.
+					# Detections entirely above the border wall are rejected here.
+					accepted = y2 >= int(img_h * FACE_Y_FRAC)
 
-				colour = (0, 255, 0) if accepted else (0, 0, 255)
-				cv_image = cv2.rectangle(cv_image, (x1, y1), (x2, y2), colour, 3)
-				cv_image = cv2.circle(cv_image, (cx, cy), 5, colour, -1)
+					colour = (0, 255, 0) if accepted else (0, 0, 255)
+					cv_image = cv2.rectangle(cv_image, (x1, y1), (x2, y2), colour, 3)
+					cv_image = cv2.circle(cv_image, (cx, cy), 5, colour, -1)
 
-				if not accepted:
-					continue
+					if not accepted:
+						continue
 
-				frame_detections.append((cx, cy, x1, y1, x2, y2))
+					frame_detections.append((cx, cy, x1, y1, x2, y2))
 
 			# Filter C: cross-frame confirmation.
 			# A detection must appear in FACE_CONFIRM_HITS consecutive-ish frames
@@ -183,9 +183,9 @@ class detect_faces(Node):
 
 			# ── REAL ROBOT: publish face markers from depth image ─────────
 			if self.real_robot:
-				for det in self.faces:
+				for i, det in enumerate(self.faces):
 					dcx, dcy, dx1, dy1, dx2, dy2 = det
-					self._real_publish_face_marker(dcx, dcy, dx1, dy1, dx2, dy2)
+					self._real_publish_face_marker(dcx, dcy, dx1, dy1, dx2, dy2, marker_id=i)
 
 		except CvBridgeError as e:
 			print(e)
@@ -214,7 +214,7 @@ class detect_faces(Node):
 				f'[REAL] Camera intrinsics: fx={fx:.1f} fy={fy:.1f} cx={ppx:.1f} cy={ppy:.1f} '
 				f'frame={self.camera_frame_id}')
 
-	def _real_publish_face_marker(self, cx, cy, bbox_x1, bbox_y1, bbox_x2, bbox_y2):
+	def _real_publish_face_marker(self, cx, cy, bbox_x1, bbox_y1, bbox_x2, bbox_y2, marker_id=0):
 		"""Back-project face pixel to 3D using depth image and camera intrinsics."""
 		if self.depth_image is None or self.camera_intrinsics is None:
 			return
@@ -269,7 +269,7 @@ class detect_faces(Node):
 		marker.header.frame_id = self.camera_frame_id
 		marker.header.stamp = self.get_clock().now().to_msg()
 		marker.type = Marker.SPHERE
-		marker.id = 0
+		marker.id = marker_id
 		marker.scale.x = marker.scale.y = marker.scale.z = 0.1
 		marker.color.r = 1.0
 		marker.color.g = 1.0
@@ -298,7 +298,7 @@ class detect_faces(Node):
 			return
 
 		# iterate over face coordinates
-		for face_cx, face_cy, *_ in self.faces:
+		for face_id, (face_cx, face_cy, *_) in enumerate(self.faces):
 
 			# get 3-channel representation of the point cloud in numpy format
 			a = pc2.read_points_numpy(data, field_names= ("x", "y", "z"))
@@ -318,7 +318,7 @@ class detect_faces(Node):
 			marker.header.stamp = data.header.stamp
 
 			marker.type = 2
-			marker.id = 0
+			marker.id = face_id
 
 			# Set the scale of the marker
 			scale = 0.1

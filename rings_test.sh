@@ -1,3 +1,4 @@
+source ~/RINS_Project/install/setup.bash
 #!/bin/bash
 
 # Launch the rings test configuration
