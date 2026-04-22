@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import threading
+
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, QoSReliabilityPolicy
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from sensor_msgs.msg import Image, PointCloud2, CameraInfo
 from sensor_msgs_py import point_cloud2 as pc2
@@ -80,27 +82,55 @@ class detect_faces(Node):
 
 			self.get_logger().info('[SIM] image=/oakd/rgb/preview/image_raw  pc=/oakd/rgb/preview/depth/points')
 
-		self.marker_pub = self.create_publisher(Marker, marker_topic, QoSReliabilityPolicy.BEST_EFFORT)
+		_MARKER_QOS = QoSProfile(
+			reliability=QoSReliabilityPolicy.BEST_EFFORT,
+			history=QoSHistoryPolicy.KEEP_LAST,
+			depth=10,
+		)
+		self.marker_pub = self.create_publisher(Marker, marker_topic, _MARKER_QOS)
 
 		self.model = YOLO("yolov8m.pt")
 
 		self.faces = []
 		self._face_candidates = []   # cross-frame accumulator
+		self._faces_lock = threading.Lock()
+
+		# Worker thread: YOLOv8 inference runs here, never in the ROS callback
+		self._latest_frame = None
+		self._frame_event = threading.Event()
+		self._frame_lock = threading.Lock()
+		self._worker = threading.Thread(target=self._inference_worker, daemon=True)
+		self._worker.start()
 
 		self.get_logger().info(f"Node has been initialized! Will publish face markers to {marker_topic}.")
 
 	def rgb_callback(self, data):
-
-		self.faces = []
-
 		try:
 			cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
-			self.rgb_image = cv_image
+		except CvBridgeError as e:
+			print(e)
+			return
+		# Store latest frame and wake the worker; old unprocessed frames are discarded
+		with self._frame_lock:
+			self._latest_frame = cv_image
+		self._frame_event.set()
+
+	def _inference_worker(self):
+		while True:
+			self._frame_event.wait()
+			self._frame_event.clear()
+
+			with self._frame_lock:
+				cv_image = self._latest_frame
+			if cv_image is None:
+				continue
+
 			img_h, img_w = cv_image.shape[:2]
 
 			res = self.model.predict(cv_image, imgsz=640, conf=0.25, show=False, verbose=False, classes=[0], device=self.device)
 
 			frame_detections = []
+			display_img = cv_image.copy()
 
 			for x in res:
 				bboxes = x.boxes.xyxy
@@ -112,22 +142,17 @@ class detect_faces(Node):
 					cx = int((x1 + x2) / 2)
 					cy = int((y1 + y2) / 2)
 
-					# Filter A: bbox bottom edge must reach the lower portion of the image.
-					# Detections entirely above the border wall are rejected here.
 					accepted = y2 >= int(img_h * FACE_Y_FRAC)
 
 					colour = (0, 255, 0) if accepted else (0, 0, 255)
-					cv_image = cv2.rectangle(cv_image, (x1, y1), (x2, y2), colour, 3)
-					cv_image = cv2.circle(cv_image, (cx, cy), 5, colour, -1)
+					display_img = cv2.rectangle(display_img, (x1, y1), (x2, y2), colour, 3)
+					display_img = cv2.circle(display_img, (cx, cy), 5, colour, -1)
 
 					if not accepted:
 						continue
 
 					frame_detections.append((cx, cy, x1, y1, x2, y2))
 
-			# Filter C: cross-frame confirmation.
-			# A detection must appear in FACE_CONFIRM_HITS consecutive-ish frames
-			# before it is treated as a real face, killing single-frame false positives.
 			matched = set()
 			for det in frame_detections:
 				dcx, dcy = det[0], det[1]
@@ -153,42 +178,47 @@ class detect_faces(Node):
 				if self._face_candidates[i]['missed'] > FACE_MAX_MISSED:
 					self._face_candidates.pop(i)
 
-			self.faces = [c['det'] for c in self._face_candidates
-						  if c['hits'] >= FACE_CONFIRM_HITS]
-			if self.faces:
-				self.get_logger().info(f"Person confirmed in view ({len(self.faces)} face(s))")
+			confirmed = [c['det'] for c in self._face_candidates
+						 if c['hits'] >= FACE_CONFIRM_HITS]
+			with self._faces_lock:
+				self.faces = confirmed
+			if confirmed:
+				self.get_logger().info(f"Person confirmed in view ({len(confirmed)} face(s))")
 
-			cv2.imshow("image", cv_image)
+			try:
+				cv2.imshow("image", display_img)
 
-			# ── REAL ROBOT: show disparity window ────────────────────────
-			if self.real_robot and self.depth_image is not None:
-				depth_f = self.depth_image.astype(np.float32)
-				if self.depth_image.dtype == np.uint16:
-					depth_f = depth_f / 1000.0
-				with np.errstate(divide='ignore', invalid='ignore'):
-					disp = np.where(depth_f > 0, 1.0 / depth_f, 0)
-				disp_8u = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-				disp_bgr = cv2.cvtColor(disp_8u, cv2.COLOR_GRAY2BGR)
-				dh, dw = disp_bgr.shape[:2]
-				for (fx, fy, *_) in self.faces:
-					cv2.circle(disp_bgr,
-							   (int(fx * dw / img_w), int(fy * dh / img_h)),
-							   8, (0, 255, 0), 2)
-				cv2.imshow("Disparity (faces)", disp_bgr)
+				# ── REAL ROBOT: show disparity window ────────────────────────
+				if self.real_robot:
+					depth_snapshot = self.depth_image
+					if depth_snapshot is not None:
+						depth_f = depth_snapshot.astype(np.float32)
+						if depth_snapshot.dtype == np.uint16:
+							depth_f = depth_f / 1000.0
+						with np.errstate(divide='ignore', invalid='ignore'):
+							disp = np.where(depth_f > 0, 1.0 / depth_f, 0)
+						disp_8u = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+						disp_bgr = cv2.cvtColor(disp_8u, cv2.COLOR_GRAY2BGR)
+						dh, dw = disp_bgr.shape[:2]
+						for (fx, fy, *_) in confirmed:
+							cv2.circle(disp_bgr,
+									   (int(fx * dw / img_w), int(fy * dh / img_h)),
+									   8, (0, 255, 0), 2)
+						cv2.imshow("Disparity (faces)", disp_bgr)
 
-			key = cv2.waitKey(1)
-			if key == 27:
-				print("exiting")
-				exit()
+				key = cv2.waitKey(1)
+				if key == 27:
+					print("exiting")
+					exit()
+			except Exception:
+				pass  # headless robot — no display available
 
 			# ── REAL ROBOT: publish face markers from depth image ─────────
 			if self.real_robot:
-				for i, det in enumerate(self.faces):
+				self.rgb_image = cv_image
+				for i, det in enumerate(confirmed):
 					dcx, dcy, dx1, dy1, dx2, dy2 = det
 					self._real_publish_face_marker(dcx, dcy, dx1, dy1, dx2, dy2, marker_id=i)
-
-		except CvBridgeError as e:
-			print(e)
 
 	def robot_state_callback(self, data):
 		"""Update robot state for conditional marker publishing."""
@@ -297,12 +327,14 @@ class detect_faces(Node):
 				throttle_duration_sec=5.0)
 			return
 
-		# iterate over face coordinates
-		for face_id, (face_cx, face_cy, *_) in enumerate(self.faces):
+		# Deserialize the point cloud once — not once per face
+		a = pc2.read_points_numpy(data, field_names=("x", "y", "z"))
+		a = a.reshape((height, width, 3))
 
-			# get 3-channel representation of the point cloud in numpy format
-			a = pc2.read_points_numpy(data, field_names= ("x", "y", "z"))
-			a = a.reshape((height,width,3))
+		# iterate over face coordinates
+		with self._faces_lock:
+			faces_snapshot = list(self.faces)
+		for face_id, (face_cx, face_cy, *_) in enumerate(faces_snapshot):
 
 			# clamp to valid range to avoid index errors
 			face_cx = int(np.clip(face_cx, 0, width - 1))

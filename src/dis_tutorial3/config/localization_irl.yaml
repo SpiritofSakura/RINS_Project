@@ -39,10 +39,10 @@ amcl:
     scan_topic: scan_filtered
     set_initial_pose: true
     initial_pose:
-      x: -3.324881070822384
-      y: -1.1934030561183864
+      x: 0.011212963176543744
+      y: -0.015000566828580439
       z: 0.0
-      yaw: 0.36
+      yaw: 1.9768
 
 map_saver:
   ros__parameters:
