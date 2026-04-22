@@ -340,8 +340,8 @@ class RingDetectorV2(Node):
         combined_visualization = cv2.bitwise_and(ring_mask, combined_mask_display)
 
         cv2.imshow("Hough Circles", debug_img)
-        if self.real_robot and colour_mask is not None:
-            cv2.imshow("Colour mask (real)", cv2.cvtColor(colour_mask, cv2.COLOR_GRAY2BGR))
+        # if self.real_robot and colour_mask is not None:
+        #     cv2.imshow("Colour mask (real)", cv2.cvtColor(colour_mask, cv2.COLOR_GRAY2BGR))
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):

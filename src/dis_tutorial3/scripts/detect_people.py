@@ -82,7 +82,7 @@ class detect_faces(Node):
 
 		self.marker_pub = self.create_publisher(Marker, marker_topic, QoSReliabilityPolicy.BEST_EFFORT)
 
-		self.model = YOLO("yolov8m.pt")
+		self.model = YOLO("yolov8n.pt")
 
 		self.faces = []
 		self._face_candidates = []   # cross-frame accumulator
@@ -98,7 +98,7 @@ class detect_faces(Node):
 			self.rgb_image = cv_image
 			img_h, img_w = cv_image.shape[:2]
 
-			res = self.model.predict(cv_image, imgsz=640, conf=0.25, show=False, verbose=False, classes=[0], device=self.device)
+			res = self.model.predict(cv_image, imgsz=320, conf=0.25, show=False, verbose=False, classes=[0], device=self.device)
 
 			frame_detections = []
 
@@ -107,23 +107,23 @@ class detect_faces(Node):
 				if bbox.nelement() == 0:
 					continue
 
-				bbox = bbox[0]
-				x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-				cx = int((x1 + x2) / 2)
-				cy = int((y1 + y2) / 2)
+				for box in bbox:
+					x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+					cx = int((x1 + x2) / 2)
+					cy = int((y1 + y2) / 2)
 
-				# Filter A: bbox bottom edge must reach the lower portion of the image.
-				# Detections entirely above the border wall are rejected here.
-				accepted = y2 >= int(img_h * FACE_Y_FRAC)
+					# Filter A: bbox bottom edge must reach the lower portion of the image.
+					# Detections entirely above the border wall are rejected here.
+					accepted = y2 >= int(img_h * FACE_Y_FRAC)
 
-				colour = (0, 255, 0) if accepted else (0, 0, 255)
-				cv_image = cv2.rectangle(cv_image, (x1, y1), (x2, y2), colour, 3)
-				cv_image = cv2.circle(cv_image, (cx, cy), 5, colour, -1)
+					colour = (0, 255, 0) if accepted else (0, 0, 255)
+					cv_image = cv2.rectangle(cv_image, (x1, y1), (x2, y2), colour, 3)
+					cv_image = cv2.circle(cv_image, (cx, cy), 5, colour, -1)
 
-				if not accepted:
-					continue
+					if not accepted:
+						continue
 
-				frame_detections.append((cx, cy, x1, y1, x2, y2))
+					frame_detections.append((cx, cy, x1, y1, x2, y2))
 
 			# Filter C: cross-frame confirmation.
 			# A detection must appear in FACE_CONFIRM_HITS consecutive-ish frames
@@ -161,20 +161,20 @@ class detect_faces(Node):
 			cv2.imshow("image", cv_image)
 
 			# ── REAL ROBOT: show disparity window ────────────────────────
-			if self.real_robot and self.depth_image is not None:
-				depth_f = self.depth_image.astype(np.float32)
-				if self.depth_image.dtype == np.uint16:
-					depth_f = depth_f / 1000.0
-				with np.errstate(divide='ignore', invalid='ignore'):
-					disp = np.where(depth_f > 0, 1.0 / depth_f, 0)
-				disp_8u = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-				disp_bgr = cv2.cvtColor(disp_8u, cv2.COLOR_GRAY2BGR)
-				dh, dw = disp_bgr.shape[:2]
-				for (fx, fy, *_) in self.faces:
-					cv2.circle(disp_bgr,
-							   (int(fx * dw / img_w), int(fy * dh / img_h)),
-							   8, (0, 255, 0), 2)
-				cv2.imshow("Disparity (faces)", disp_bgr)
+			# if self.real_robot and self.depth_image is not None:
+			# 	depth_f = self.depth_image.astype(np.float32)
+			# 	if self.depth_image.dtype == np.uint16:
+			# 		depth_f = depth_f / 1000.0
+			# 	with np.errstate(divide='ignore', invalid='ignore'):
+			# 		disp = np.where(depth_f > 0, 1.0 / depth_f, 0)
+			# 	disp_8u = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+			# 	disp_bgr = cv2.cvtColor(disp_8u, cv2.COLOR_GRAY2BGR)
+			# 	dh, dw = disp_bgr.shape[:2]
+			# 	for (fx, fy, *_) in self.faces:
+			# 		cv2.circle(disp_bgr,
+			# 				   (int(fx * dw / img_w), int(fy * dh / img_h)),
+			# 				   8, (0, 255, 0), 2)
+			# 	cv2.imshow("Disparity (faces)", disp_bgr)
 
 			key = cv2.waitKey(1)
 			if key == 27:
