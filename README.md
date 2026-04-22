@@ -21,6 +21,17 @@ To scan the map manually:
 ---
 
 ## Real World (IRL)
+**IMPORTANT:**
+
+Anyone cloning the repo for the first time gets it automatically with:
+
+
+git clone --recurse-submodules <repo-url>
+And if they already have the repo cloned without the submodule:
+
+
+git submodule update --init
+That's the only extra step teammates need to do once — after that, normal git pull keeps everything in sync.
 
 ### Requirements
 - TurtleBot4 powered on and connected to the same network
