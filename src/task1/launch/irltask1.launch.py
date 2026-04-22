@@ -12,6 +12,13 @@ def generate_launch_description():
         output='screen',
     )
 
+    robot_state_overlay_node = Node(
+        package='task1',
+        executable='robot_state_overlay',
+        name='robot_state_overlay',
+        output='screen',
+    )
+
     waypoint_navigator_node = Node(
         package='task1',
         executable='waypoint_navigator',
@@ -23,4 +30,5 @@ def generate_launch_description():
     return LaunchDescription([
         behavior_manager_node,
         waypoint_navigator_node,
+        robot_state_overlay_node,
     ])

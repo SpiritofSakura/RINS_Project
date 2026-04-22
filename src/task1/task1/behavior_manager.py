@@ -372,7 +372,7 @@ class BehaviorManager(Node):
         if dist < 0.05:
             return None
 
-        offset = 1.5
+        offset = 0.32  # Desired distance from target when approaching
         if dist <= offset:
             goal_x = robot_x
             goal_y = robot_y

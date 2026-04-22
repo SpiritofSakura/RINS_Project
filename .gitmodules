@@ -1,0 +1,3 @@
+[submodule "src/rviz_2d_overlay_plugins"]
+	path = src/rviz_2d_overlay_plugins
+	url = https://github.com/teamspatzenhirn/rviz_2d_overlay_plugins
