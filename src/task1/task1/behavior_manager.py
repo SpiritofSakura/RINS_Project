@@ -24,6 +24,10 @@ def yaw_to_quaternion(yaw):
     return quaternion
 
 
+def yaw_from_quaternion(q):
+    return 2.0 * math.atan2(q.z, q.w)
+
+
 class BehaviorManager(Node):
     def __init__(self):
         super().__init__('behavior_manager')
@@ -44,6 +48,7 @@ class BehaviorManager(Node):
         self.latest_robot_pose = None
         self.saved_patrol_pose = None
 
+
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.nav_server_ready = False
         self.waiting_for_goal_accept = False
@@ -59,6 +64,8 @@ class BehaviorManager(Node):
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
         self.approach_timeout = 15.0  # seconds
+        self.rotation_threshold = math.pi / 2
+        self.pending_return_pose = None
 
         self.face_lines = [
             "Hello there. I come in peace.",
@@ -319,6 +326,21 @@ class BehaviorManager(Node):
         self.nav_goal_type = None
         self.approach_start_time = None  # Clear approach timeout
 
+        if nav_goal_type == 'pre_rotation_return_to_patrol':
+            if self.pending_return_pose is not None:
+                x, y, yaw = self.pending_return_pose
+                self.pending_return_pose = None
+                if status != GoalStatus.STATUS_SUCCEEDED:
+                    self.get_logger().warn('Pre-rotation for return-to-patrol failed — sending return goal anyway.')
+                if not self.send_nav_goal(x, y, yaw, 'return_to_patrol'):
+                    self.get_logger().warn('Could not start return-to-patrol after pre-rotation.')
+                    self.active_target = None
+                    self.saved_patrol_pose = None
+                    self.refresh_state()
+            else:
+                self.refresh_state()
+            return
+
         if status == GoalStatus.STATUS_SUCCEEDED:
             if nav_goal_type == 'approach_face':
                 self.publish_state('INTERACT_FACE')
@@ -357,6 +379,16 @@ class BehaviorManager(Node):
             if self.distance(x, y, target['x'], target['y']) <= self.target_match_threshold:
                 return True
         return False
+
+    def needs_rotation(self, target_x, target_y):
+        if self.latest_robot_pose is None:
+            return False
+        dx = target_x - self.latest_robot_pose.position.x
+        dy = target_y - self.latest_robot_pose.position.y
+        angle_to_target = math.atan2(dy, dx)
+        current_yaw = yaw_from_quaternion(self.latest_robot_pose.orientation)
+        diff = math.atan2(math.sin(angle_to_target - current_yaw), math.cos(angle_to_target - current_yaw))
+        return abs(diff) > self.rotation_threshold
 
     def compute_approach_point(self, target_x, target_y):
         if self.latest_robot_pose is None:
@@ -454,7 +486,8 @@ class BehaviorManager(Node):
         self.goal_handle = None
         self.result_future = None
         self.nav_goal_type = None
-        self.approach_start_time = None  # Reset timer when goal is cancelled
+        self.approach_start_time = None
+        self.pending_return_pose = None
 
     def refresh_state(self, force_publish=False):
         if self.manual_control_active:
@@ -616,15 +649,30 @@ class BehaviorManager(Node):
 
         x = self.saved_patrol_pose.pose.position.x
         y = self.saved_patrol_pose.pose.position.y
-        yaw = 2.0 * math.atan2(
-            self.saved_patrol_pose.pose.orientation.z,
-            self.saved_patrol_pose.pose.orientation.w
-        )
+        yaw = yaw_from_quaternion(self.saved_patrol_pose.pose.orientation)
 
         if self.goal_active:
             self.cancel_temporary_goal()
 
-        if self.send_nav_goal(x, y, yaw, 'return_to_patrol'):
+        coming_from_interact = self.current_state in ('INTERACT_FACE', 'INTERACT_RING')
+
+        if coming_from_interact and self.needs_rotation(x, y):
+            angle_to_target = math.atan2(
+                y - self.latest_robot_pose.position.y,
+                x - self.latest_robot_pose.position.x
+            )
+            self.pending_return_pose = (x, y, yaw)
+            rot_x = self.latest_robot_pose.position.x
+            rot_y = self.latest_robot_pose.position.y
+            if self.send_nav_goal(rot_x, rot_y, angle_to_target, 'pre_rotation_return_to_patrol'):
+                self.publish_state('RETURN_TO_PATROL')
+            else:
+                self.get_logger().warn('Could not start pre-rotation for return-to-patrol.')
+                self.pending_return_pose = None
+                self.active_target = None
+                self.saved_patrol_pose = None
+                self.refresh_state()
+        elif self.send_nav_goal(x, y, yaw, 'return_to_patrol'):
             self.publish_state('RETURN_TO_PATROL')
         else:
             self.get_logger().warn('Could not start return-to-patrol navigation.')

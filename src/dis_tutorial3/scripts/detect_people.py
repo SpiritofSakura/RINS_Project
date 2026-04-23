@@ -90,6 +90,7 @@ class detect_faces(Node):
 		self.marker_pub = self.create_publisher(Marker, marker_topic, _MARKER_QOS)
 
 		self.model = YOLO("yolov8m.pt")
+		self.model.to('cuda')
 
 		self.faces = []
 		self._face_candidates = []   # cross-frame accumulator
@@ -127,7 +128,7 @@ class detect_faces(Node):
 
 			img_h, img_w = cv_image.shape[:2]
 
-			res = self.model.predict(cv_image, imgsz=640, conf=0.25, show=False, verbose=False, classes=[0], device=self.device)
+			res = self.model.predict(cv_image, imgsz=640, conf=0.25, show=False, verbose=False, classes=[0], device='cuda')
 
 			frame_detections = []
 			display_img = cv_image.copy()

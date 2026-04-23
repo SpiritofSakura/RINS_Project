@@ -14,7 +14,7 @@ class FaceLocalizator(Node):
         super().__init__('face_localizator')
 
         self.threshold_detections = 10
-        self.cluster_radius = 1.0
+        self.cluster_radius = 1
         self.duplicate_radius = 0.9
 
         self.tf_buffer = tf2_ros.Buffer()
