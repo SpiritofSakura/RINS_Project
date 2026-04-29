@@ -18,7 +18,7 @@ from collections import Counter
 # ── Tuning ────────────────────────────────────────────────────────────────────
 CLUSTER_RADIUS        = 0.7    # m — detections within this radius → same ring
 CONFIRM_THRESH        = 7      # detections needed to confirm a ring (sim)
-CONFIRM_THRESH_REAL   = 20     # stricter for real robot — filters noisy false positives
+CONFIRM_THRESH_REAL   = 8      # detections needed to confirm a ring (real robot)
 MIN_MARK_DIST         = 0.7    # m — minimum distance between two confirmed rings
 MAX_RAW_PTS           = 500    # max points stored per cluster before trimming
 

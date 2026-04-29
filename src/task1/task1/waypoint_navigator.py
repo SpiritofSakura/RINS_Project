@@ -43,6 +43,11 @@ class WaypointNavigator(Node):
         self.cilj_aktiven = False
         self.koncan = False
 
+        # Initial scan delay: hold for 4s on first patrol start
+        self.initial_scan_done = False
+        self.initial_scan_start_time = None
+        self.initial_scan_duration = 4.0
+
         self.rocaj_cilja = None
         self.rezultat_prihodnost = None
 
@@ -230,6 +235,16 @@ class WaypointNavigator(Node):
         if not self.prej_patro_om:
             self.get_logger().info('Resuming patrol...')
             self.prej_patro_om = True
+            if not self.initial_scan_done:
+                self.initial_scan_start_time = self.get_clock().now()
+
+        # Hold at start position for initial scan
+        if not self.initial_scan_done and self.initial_scan_start_time is not None:
+            elapsed = (self.get_clock().now() - self.initial_scan_start_time).nanoseconds / 1e9
+            if elapsed < self.initial_scan_duration:
+                return
+            self.initial_scan_done = True
+            self.get_logger().info('Initial scan complete. Starting patrol.')
 
         if self.indeks_tocke >= len(self.seznam_tock):
             self.get_logger().info('Vse tocke so opravljene.')

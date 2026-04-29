@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -11,7 +12,22 @@ def generate_launch_description():
         'real_robot', default_value='false', choices=['true', 'false'],
         description='Use real robot configuration (IRL waypoints, depth camera, etc.)'
     )
+    detector_backend_arg = DeclareLaunchArgument(
+        'detector_backend', default_value='yolo',
+        description='Face detector backend: yolo for GPU, haar for CPU fallback'
+    )
+    face_model_arg = DeclareLaunchArgument(
+        'face_model', default_value='/home/zeta/RINS_Project/models/yolov8n-face-lindevs.pt',
+        description='Path to a face-specific YOLO model'
+    )
+    device_arg = DeclareLaunchArgument(
+        'device', default_value='0',
+        description='Ultralytics device. Use 0 for CUDA GPU, cpu for CPU.'
+    )
     real_robot = LaunchConfiguration('real_robot')
+    detector_backend = LaunchConfiguration('detector_backend')
+    face_model = LaunchConfiguration('face_model')
+    device = LaunchConfiguration('device')
 
     waypoints_file = PythonExpression([
         "'irl-waypoints.yaml' if '", real_robot, "' == 'true' else 'waypoints.yaml'"
@@ -23,7 +39,13 @@ def generate_launch_description():
         executable='detect_people.py',
         name='detect_people',
         parameters=[
-            {'enabled': True, 'real_robot': real_robot},
+            {
+                'enabled': True,
+                'real_robot': real_robot,
+                'detector_backend': detector_backend,
+                'face_model': face_model,
+                'device': ParameterValue(device, value_type=str),
+            },
         ],
     )
     
@@ -86,6 +108,9 @@ def generate_launch_description():
     # Create launch description and add all nodes
     ld = LaunchDescription([
         real_robot_arg,
+        detector_backend_arg,
+        face_model_arg,
+        device_arg,
         detect_people_node,
         face_localizator_node,
         robot_state_overlay_node,

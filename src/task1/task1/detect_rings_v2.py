@@ -17,7 +17,7 @@ import rclpy
 from rclpy.node import Node
 import cv2
 import numpy as np
-from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs.msg import Image, CompressedImage, PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
 from cv_bridge import CvBridge, CvBridgeError
 from visualization_msgs.msg import Marker
@@ -34,12 +34,12 @@ SENSOR_QOS = QoSProfile(
 
 # ── Hough circle tuning ───────────────────────────────────────────────────────
 HOUGH_DP = 1                    # Inverse ratio of accumulator resolution
-HOUGH_MIN_DIST = 40             # Minimum distance between circle centres
+HOUGH_MIN_DIST = 80             # Minimum distance between circle centres
 HOUGH_PARAM1 = 48               # Upper threshold for Canny edge (balanced strictness)
 HOUGH_PARAM2 = 25               # Accumulator threshold (sim)
-HOUGH_PARAM2_REAL = 30          # Accumulator threshold (real robot)
+HOUGH_PARAM2_REAL = 45          # Accumulator threshold (real robot)
 HOUGH_MIN_RADIUS = 1            # Minimum circle radius in pixels (lowered to detect black ring)
-HOUGH_MAX_RADIUS = 70           # Maximum circle radius (px)
+HOUGH_MAX_RADIUS = 150          # Maximum circle radius (px)
 
 # ── Cross-frame confirmation (handled by ring_localizator) ────────────────────
 MAX_MISSED    = 4               # frames without match before dropping candidate
@@ -61,12 +61,6 @@ COLOUR_RANGES = {
     "blue": [
         (np.array([100, 80,  50]), np.array([140, 255, 255])),
     ],
-    "yellow": [
-        (np.array([20,  100, 100]), np.array([35, 255, 255])),
-    ],
-    "orange": [
-        (np.array([10,  150,  80]), np.array([20, 255, 255])),
-    ],
     "black": [
         (np.array([0, 0, 0]), np.array([180, 255, 50])),
     ],
@@ -84,28 +78,20 @@ COLOUR_RANGES_REAL = {
     "blue": [
         (np.array([95,  50,  30]), np.array([145, 255, 255])),
     ],
-    "yellow": [
-        (np.array([18,  60,  60]), np.array([38, 255, 255])),
-    ],
-    "orange": [
-        (np.array([8,   80,  50]), np.array([22, 255, 255])),
-    ],
     "black": [
         (np.array([0, 0, 0]), np.array([180, 255, 60])),
     ],
 }
 
 # ── Colour class names ────────────────────────────────────────────────────────
-COLOUR_NAMES = ['red', 'green', 'blue', 'yellow', 'orange', 'black']
+COLOUR_NAMES = ['red', 'green', 'blue', 'black']
 
 # RViz marker colours (r, g, b) per ring colour
 MARKER_COLOURS = {
-    "red":    (1.0, 0.0, 0.0),
-    "green":  (0.0, 1.0, 0.0),
-    "blue":   (0.0, 0.4, 1.0),
-    "yellow": (1.0, 1.0, 0.0),
-    "orange": (1.0, 0.5, 0.0),
-    "black":  (0.1, 0.1, 0.1),
+    "red":   (1.0, 0.0, 0.0),
+    "green": (0.0, 1.0, 0.0),
+    "blue":  (0.0, 0.4, 1.0),
+    "black": (0.1, 0.1, 0.1),
 }
 
 
@@ -134,7 +120,7 @@ class RingDetectorV2(Node):
         real = self.get_parameter('real_robot').get_parameter_value().bool_value
 
         if real:
-            img_topic   = '/gemini/color/image_raw'
+            img_topic   = '/gemini/color/image_raw/compressed'
             depth_topic = '/gemini/depth/image_raw'
             pc_topic    = '/gemini/depth/points'
         else:
@@ -152,9 +138,11 @@ class RingDetectorV2(Node):
             f"{'[REAL]' if real else '[SIM]'} "
             f"image={img_topic}  depth={depth_topic}  pc={pc_topic}")
 
-        # Subscriptions
+        # Subscriptions — real robot uses compressed topic to cut WiFi bandwidth ~15x
+        img_cb = self.image_compressed_callback if real else self.image_callback
+        img_msg_type = CompressedImage if real else Image
         self.image_sub = self.create_subscription(
-            Image, img_topic, self.image_callback, SENSOR_QOS)
+            img_msg_type, img_topic, img_cb, SENSOR_QOS)
         self.depth_sub = self.create_subscription(
             Image, depth_topic, self.depth_callback, SENSOR_QOS)
         if not real:
@@ -173,12 +161,13 @@ class RingDetectorV2(Node):
         self.marker_pub = self.create_publisher(Marker, "/ring_marker", 10)
         self.colour_pub = self.create_publisher(String, "/ring_colour", 10)
 
-        # Debug windows
-        cv2.namedWindow("Hough Circles", cv2.WINDOW_NORMAL)
-        if self.real_robot:
-            cv2.namedWindow("Colour mask (real)", cv2.WINDOW_NORMAL)
-
         self.combined_mask = None
+
+        # Debug images written by worker, displayed by main-thread timer (OpenCV GUI is not thread-safe)
+        self._debug_img      = None
+        self._debug_mask     = None
+        self._debug_depth    = None
+        self._debug_img_lock = threading.Lock()
 
         # Worker thread — detection runs here so image_callback never blocks the executor
         self._latest_rgb  = None
@@ -186,6 +175,9 @@ class RingDetectorV2(Node):
         self._frame_event = threading.Event()
         self._worker = threading.Thread(target=self._detection_worker, daemon=True)
         self._worker.start()
+
+        # Timer to push debug images to OpenCV windows from the ROS executor thread
+        self.create_timer(0.05, self._display_timer_callback)
 
         self.get_logger().info("RingDetector V2 ready (Hough circle mode).")
 
@@ -250,98 +242,126 @@ class RingDetectorV2(Node):
             self._latest_rgb = rgb
         self._frame_event.set()  # worker discards old unprocessed frames automatically
 
+    def image_compressed_callback(self, data):
+        """Decode CompressedImage — used on real robot to reduce WiFi bandwidth."""
+        try:
+            np_arr = np.frombuffer(data.data, np.uint8)
+            rgb = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if rgb is None:
+                return
+        except Exception as e:
+            self.get_logger().error(f'Compressed image decode error: {e}')
+            return
+        self.image_header = data.header
+        with self._frame_lock:
+            self._latest_rgb = rgb
+        self._frame_event.set()
+
     def _detection_worker(self):
         """All heavy detection runs here — off the ROS executor thread."""
         while True:
             self._frame_event.wait()
             self._frame_event.clear()
-
-            with self._frame_lock:
-                cv_image = self._latest_rgb
-            depth_snapshot = self.depth_raw  # atomic Python reference read (GIL-safe)
-
-            if cv_image is None or depth_snapshot is None:
-                if cv_image is not None:
-                    self.get_logger().warn(
-                        "Waiting for depth data", throttle_duration_sec=3.0)
-                continue
-
-            # Convert depth to disparity (inverse, normalized)
-            depth_m = depth_snapshot.astype(np.float32) / 1000.0  # mm → m
-            with np.errstate(divide='ignore', invalid='ignore'):
-                disparity = np.where(depth_m > 0, 1.0 / depth_m, 0)
-            disparity_8u = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            disparity_8u = cv2.GaussianBlur(disparity_8u, (5, 5), 0)
-
-            # Disparity mask: pixels with valid depth
-            disparity_mask = (disparity > 0).astype(np.uint8) * 255
-
-            if self.real_robot:
-                # ── REAL ROBOT: colour-mask the disparity before Hough ───────────
-                hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-                colour_mask = np.zeros(cv_image.shape[:2], dtype=np.uint8)
-                for ranges in COLOUR_RANGES_REAL.values():
-                    for lo, hi in ranges:
-                        colour_mask |= cv2.inRange(hsv, lo, hi)
-                colour_mask = cv2.morphologyEx(
-                    colour_mask, cv2.MORPH_CLOSE,
-                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
-                hough_input = cv2.bitwise_and(disparity_8u, disparity_8u, mask=colour_mask)
-                param2 = HOUGH_PARAM2_REAL
-            else:
-                # ── SIMULATION: run Hough on full disparity image ────────────────
-                hough_input = disparity_8u
-                colour_mask = None
-                param2 = HOUGH_PARAM2
-
-            # Hough circle detection
-            circles = cv2.HoughCircles(
-                hough_input,
-                cv2.HOUGH_GRADIENT,
-                dp=HOUGH_DP,
-                minDist=HOUGH_MIN_DIST,
-                param1=HOUGH_PARAM1,
-                param2=param2,
-                minRadius=HOUGH_MIN_RADIUS,
-                maxRadius=HOUGH_MAX_RADIUS,
-            )
-
-            img_height = disparity_8u.shape[0]
-            frame_detections = []
-            if circles is not None:
-                self.get_logger().info(f"Hough found {len(circles[0])} circles - publishing all")
-                for circle in circles[0]:
-                    cx, cy, radius = int(circle[0]), int(circle[1]), int(circle[2])
-                    if self.real_robot and cy >= img_height // 2:
-                        continue  # on real robot, only detect rings in top half of image
-                    ring = self._evaluate_circle(cx, cy, radius, depth_m, cv_image, disparity_mask)
-                    if ring is not None:
-                        frame_detections.append(ring)
-                self.get_logger().info(f"Publishing {len(frame_detections)} detections")
-
-            # ── Publish each valid detection ──────────────────────────────────────
-            for detection in frame_detections:
-                self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'],
-                                         detection['ring_patch'], detection['radius'],
-                                         detection['patch_mask'], colour_mask)
-
-            # Debug visualization
-            debug_img = cv_image.copy()
-            if circles is not None:
-                for circle in circles[0]:
-                    cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
-                    filtered_out = self.real_robot and cy >= img_height // 2
-                    colour = (0, 0, 255) if filtered_out else (0, 255, 0)
-                    cv2.circle(debug_img, (cx, cy), r, colour, 2)
-                    cv2.circle(debug_img, (cx, cy), 2, colour, 3)
-
             try:
+                self._process_frame()
+            except Exception as e:
+                self.get_logger().error(f"Detection worker error: {e}", throttle_duration_sec=5.0)
+
+    def _process_frame(self):
+        with self._frame_lock:
+            cv_image = self._latest_rgb
+        depth_snapshot = self.depth_raw  # atomic Python reference read (GIL-safe)
+
+        if cv_image is None or depth_snapshot is None:
+            if cv_image is not None:
+                self.get_logger().warn(
+                    "Waiting for depth data", throttle_duration_sec=3.0)
+            return
+
+        # Convert depth to disparity (inverse, normalized)
+        depth_m = depth_snapshot.astype(np.float32) / 1000.0  # mm → m
+        with np.errstate(divide='ignore', invalid='ignore'):
+            disparity = np.where(depth_m > 0, 1.0 / depth_m, 0)
+        disparity_8u = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        disparity_8u = cv2.GaussianBlur(disparity_8u, (5, 5), 0)
+
+        # Disparity mask: pixels with valid depth
+        disparity_mask = (disparity > 0).astype(np.uint8) * 255
+
+        if self.real_robot:
+            hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+            colour_mask = np.zeros(cv_image.shape[:2], dtype=np.uint8)
+            for ranges in COLOUR_RANGES_REAL.values():
+                for lo, hi in ranges:
+                    colour_mask |= cv2.inRange(hsv, lo, hi)
+            colour_mask = cv2.morphologyEx(
+                colour_mask, cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+            hough_input = disparity_8u
+            param2 = HOUGH_PARAM2_REAL
+        else:
+            hough_input = disparity_8u
+            colour_mask = None
+            param2 = HOUGH_PARAM2
+
+        # Hough circle detection
+        circles = cv2.HoughCircles(
+            hough_input,
+            cv2.HOUGH_GRADIENT,
+            dp=HOUGH_DP,
+            minDist=HOUGH_MIN_DIST,
+            param1=HOUGH_PARAM1,
+            param2=param2,
+            minRadius=HOUGH_MIN_RADIUS,
+            maxRadius=HOUGH_MAX_RADIUS,
+        )
+
+        frame_detections = []
+        if circles is not None:
+            self.get_logger().info(f"Hough found {len(circles[0])} circles - publishing all")
+            for circle in circles[0]:
+                cx, cy, radius = int(circle[0]), int(circle[1]), int(circle[2])
+                ring = self._evaluate_circle(cx, cy, radius, depth_m, cv_image, disparity_mask)
+                if ring is not None:
+                    frame_detections.append(ring)
+            self.get_logger().info(f"Publishing {len(frame_detections)} detections")
+
+        # ── Publish each valid detection ──────────────────────────────────────
+        for detection in frame_detections:
+            self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'],
+                                     detection['ring_patch'], detection['radius'],
+                                     detection['patch_mask'], colour_mask)
+
+        # Debug visualization
+        debug_img = cv_image.copy()
+        if circles is not None:
+            for circle in circles[0]:
+                cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
+                cv2.circle(debug_img, (cx, cy), r, (0, 255, 0), 2)
+                cv2.circle(debug_img, (cx, cy), 2, (0, 255, 0), 3)
+
+        mask_bgr = cv2.cvtColor(colour_mask, cv2.COLOR_GRAY2BGR) if colour_mask is not None else None
+        with self._debug_img_lock:
+            self._debug_img   = debug_img
+            self._debug_mask  = mask_bgr
+            self._debug_depth = cv2.cvtColor(disparity_8u, cv2.COLOR_GRAY2BGR)
+
+    def _display_timer_callback(self):
+        """Push latest debug images to OpenCV windows — always called from the ROS executor thread."""
+        with self._debug_img_lock:
+            debug_img = self._debug_img
+            debug_mask = self._debug_mask
+            debug_depth = self._debug_depth
+        try:
+            if debug_img is not None:
                 cv2.imshow("Hough Circles", debug_img)
-                if self.real_robot and colour_mask is not None:
-                    cv2.imshow("Colour mask (real)", cv2.cvtColor(colour_mask, cv2.COLOR_GRAY2BGR))
-                cv2.waitKey(1)
-            except Exception:
-                pass  # headless robot — no display available
+            if self.real_robot and debug_mask is not None:
+                cv2.imshow("Colour mask (real)", debug_mask)
+            if debug_depth is not None:
+                cv2.imshow("Disparity", debug_depth)
+            cv2.waitKey(1)
+        except Exception:
+            pass
 
     def robot_state_callback(self, data):
         """Update robot state for conditional marker publishing."""
@@ -356,11 +376,37 @@ class RingDetectorV2(Node):
         if not (radius < cx < w - radius and radius < cy < h - radius):
             return None
 
-        # Get center depth for marker position
-        centre_depth = depth_m[cy, cx]
-        if centre_depth < 0.1 or centre_depth > MAX_RANGE_M:
-            # Use a default distance if depth is invalid
-            centre_depth = 1.0
+        # Hollowness check: sample rim depth and centre depth.
+        # A real ring's centre (through the hole) must be farther than its rim,
+        # or have mostly invalid depth (you see through to background).
+        n_rim = 16
+        rim_depths = []
+        for k in range(n_rim):
+            angle = 2 * np.pi * k / n_rim
+            rx = int(np.clip(cx + radius * np.cos(angle), 0, w - 1))
+            ry = int(np.clip(cy + radius * np.sin(angle), 0, h - 1))
+            d = depth_m[ry, rx]
+            if d > 0.1:
+                rim_depths.append(d)
+
+        if len(rim_depths) < n_rim // 3:
+            return None  # too few valid rim points — not a solid ring edge
+
+        rim_median = float(np.median(rim_depths))
+
+        inner_r = max(int(radius * 0.4), 2)
+        centre_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.circle(centre_mask, (cx, cy), inner_r, 255, -1)
+        centre_pixels = depth_m[centre_mask > 0]
+        invalid_frac = float(np.mean(centre_pixels < 0.1))
+        valid_centre = centre_pixels[centre_pixels > 0.1]
+        centre_median = float(np.median(valid_centre)) if len(valid_centre) > 0 else MAX_RANGE_M
+
+        hollow = invalid_frac > 0.25 or centre_median > rim_median + 0.05
+        if not hollow:
+            return None
+
+        centre_depth = rim_median
 
         # Create individual ring mask for this circle
         ring_circle_mask = np.zeros((h, w), dtype=np.uint8)
@@ -414,10 +460,6 @@ class RingDetectorV2(Node):
             return "black"
         elif 0 <= h < 10 or 170 <= h <= 180:
             return "red"
-        elif 10 <= h < 20:
-            return "orange"
-        elif 20 <= h < 32:
-            return "yellow"
         elif 32 <= h < 85:
             return "green"
         elif 100 <= h < 130:
@@ -448,10 +490,6 @@ class RingDetectorV2(Node):
             return "black"
         elif 0 <= h < 10 or 170 <= h <= 180:
             return "red"
-        elif 10 <= h < 20:
-            return "orange"
-        elif 20 <= h < 32:
-            return "yellow"
         elif 32 <= h < 85:
             return "green"
         elif 100 <= h < 130:
@@ -496,10 +534,6 @@ class RingDetectorV2(Node):
             return "black"
         elif 0 <= h < 10 or 170 <= h <= 180:
             return "red"
-        elif 10 <= h < 20:
-            return "orange"
-        elif 20 <= h < 32:
-            return "yellow"
         elif 32 <= h < 85:
             return "green"
         elif 100 <= h < 130:
@@ -543,10 +577,6 @@ class RingDetectorV2(Node):
                 return "black"
             elif 0 <= h < 10 or 170 <= h <= 180:
                 return "red"
-            elif 10 <= h < 20:
-                return "orange"
-            elif 20 <= h < 32:
-                return "yellow"
             elif 32 <= h < 85:
                 return "green"
             elif 100 <= h < 130:
@@ -629,6 +659,12 @@ class RingDetectorV2(Node):
             result = self._real_get_3d_from_colour_mask(cx, cy, radius, colour_mask)
             if result is not None:
                 x, y, z = result
+            elif self.camera_intrinsics is not None and depth_m > 0.1:
+                # Fallback: back-project centre pixel directly
+                fx, fy, ppx, ppy = self.camera_intrinsics
+                z = depth_m
+                x = (cx - ppx) * z / fx
+                y = (cy - ppy) * z / fy
             marker_frame = self.camera_frame_id
         else:
             # ── SIM: sample rim in organized point cloud ──────────────────────

@@ -2,8 +2,6 @@
 
 import math
 import random
-import shutil
-import subprocess
 
 import rclpy
 from rclpy.node import Node
@@ -11,7 +9,7 @@ from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
+from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import Bool, String, Empty
 from visualization_msgs.msg import Marker
@@ -54,11 +52,15 @@ class BehaviorManager(Node):
 
         self.interaction_active = False
         self.interaction_end_time = None
-        self.interaction_duration = 2.5
 
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
         self.approach_timeout = 15.0  # seconds
+
+        # Return-to-patrol timeout: abandon if stuck for too long
+        self.return_patrol_start_time = None
+        self.return_patrol_timeout = 20.0  # seconds
+        self.return_patrol_skip_dist = 1.0  # skip return if already within this distance (m)
 
         self.face_lines = [
             "Hello there. I come in peace.",
@@ -88,6 +90,8 @@ class BehaviorManager(Node):
 
         self.state_publisher = self.create_publisher(String, '/robot_state', qos_latched)
         self.patrol_enabled_publisher = self.create_publisher(Bool, '/patrol_enabled', qos_latched)
+        self.speak_publisher = self.create_publisher(String, '/speak', 10)
+        self.handled_face_publisher = self.create_publisher(Point, '/handled_face_location', 10)
 
         self.manual_control_subscriber = self.create_subscription(
             Bool,
@@ -188,20 +192,14 @@ class BehaviorManager(Node):
         self.saved_patrol_pose.pose = self.latest_robot_pose
         return True
 
-    def speak_text(self, text):
+    def speak_text(self, text, on_done=None):
+        """Publish to /speak — robot's onboard speaker handles TTS."""
         self.get_logger().info(f'SPEAK: {text}')
-
-        try:
-            if shutil.which('spd-say') is not None:
-                subprocess.run(['spd-say', '--wait', text], check=False)
-                return
-
-            if shutil.which('espeak') is not None:
-                subprocess.run(['espeak', text], check=False)
-                return
-
-        except Exception as exc:
-            self.get_logger().warn(f'Speech failed: {exc}')
+        msg = String()
+        msg.data = text
+        self.speak_publisher.publish(msg)
+        if on_done:
+            on_done()
 
     def marker_to_ring_color(self, marker: Marker):
         red = round(marker.color.r, 2)
@@ -237,7 +235,20 @@ class BehaviorManager(Node):
 
     def start_interaction(self):
         self.interaction_active = True
-        self.interaction_end_time = self.get_clock().now().nanoseconds + int(self.interaction_duration * 1e9)
+        self.interaction_end_time = self.get_clock().now().nanoseconds + int(2.5 * 1e9)
+
+        if self.current_state == 'INTERACT_FACE':
+            line = self.random_face_line()
+        elif self.current_state == 'INTERACT_RING':
+            if self.active_target and 'color' in self.active_target:
+                line = self.random_ring_line(self.active_target['color'])
+            else:
+                line = 'I found a ring. Quite mysterious.'
+        else:
+            line = None
+
+        if line:
+            self.speak_text(line)
 
     def finish_interaction(self):
         self.interaction_active = False
@@ -267,17 +278,22 @@ class BehaviorManager(Node):
 
         if self.interaction_active and self.interaction_end_time is not None:
             if self.get_clock().now().nanoseconds >= self.interaction_end_time:
-                if self.current_state == 'INTERACT_FACE':
-                    self.speak_text(self.random_face_line())
-
-                elif self.current_state == 'INTERACT_RING':
-                    if self.active_target is not None and 'color' in self.active_target:
-                        self.speak_text(self.random_ring_line(self.active_target['color']))
-                    else:
-                        self.speak_text('I found a ring. Quite mysterious.')
-
+                self.get_logger().info('Interaction delay complete. Returning to patrol.')
                 self.finish_interaction()
             return
+
+        # Return-to-patrol timeout: abandon if stuck, resume patrol from current position
+        if self.return_patrol_start_time is not None and self.current_state == 'RETURN_TO_PATROL':
+            elapsed = (self.get_clock().now().nanoseconds - self.return_patrol_start_time) / 1e9
+            if elapsed >= self.return_patrol_timeout:
+                self.get_logger().warn(
+                    f'Return-to-patrol stuck for {elapsed:.1f}s — abandoning and resuming patrol.')
+                self.return_patrol_start_time = None
+                self.cancel_temporary_goal()
+                self.active_target = None
+                self.saved_patrol_pose = None
+                self.refresh_state()
+                return
 
         # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
         # This is a FAILSAFE that cancels the stuck nav goal and forces interaction to start
@@ -317,7 +333,8 @@ class BehaviorManager(Node):
         self.goal_handle = None
         self.result_future = None
         self.nav_goal_type = None
-        self.approach_start_time = None  # Clear approach timeout
+        self.approach_start_time = None
+        self.return_patrol_start_time = None
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             if nav_goal_type == 'approach_face':
@@ -372,7 +389,7 @@ class BehaviorManager(Node):
         if dist < 0.05:
             return None
 
-        offset = 0.32  # Desired distance from target when approaching
+        offset = 0.5  # Desired distance from target when approaching
         if dist <= offset:
             goal_x = robot_x
             goal_y = robot_y
@@ -608,6 +625,13 @@ class BehaviorManager(Node):
             f"x={self.active_target['x']:.2f}, y={self.active_target['y']:.2f}"
         )
 
+        if self.active_target['type'] == 'face':
+            pt = Point()
+            pt.x = float(self.active_target['x'])
+            pt.y = float(self.active_target['y'])
+            pt.z = float(self.active_target['z'])
+            self.handled_face_publisher.publish(pt)
+
         if self.saved_patrol_pose is None:
             self.get_logger().warn('No saved patrol pose. Clearing target without return.')
             self.active_target = None
@@ -621,11 +645,27 @@ class BehaviorManager(Node):
             self.saved_patrol_pose.pose.orientation.w
         )
 
+        # Skip return navigation if robot is already close to the saved patrol pose
+        if self.latest_robot_pose is not None:
+            dist = self.distance(
+                self.latest_robot_pose.position.x,
+                self.latest_robot_pose.position.y,
+                x, y
+            )
+            if dist <= self.return_patrol_skip_dist:
+                self.get_logger().info(
+                    f'Already within {dist:.2f}m of patrol pose — skipping return navigation.')
+                self.active_target = None
+                self.saved_patrol_pose = None
+                self.refresh_state()
+                return
+
         if self.goal_active:
             self.cancel_temporary_goal()
 
         if self.send_nav_goal(x, y, yaw, 'return_to_patrol'):
             self.publish_state('RETURN_TO_PATROL')
+            self.return_patrol_start_time = self.get_clock().now().nanoseconds
         else:
             self.get_logger().warn('Could not start return-to-patrol navigation.')
             self.active_target = None

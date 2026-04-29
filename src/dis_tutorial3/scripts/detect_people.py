@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
 import threading
+from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
-from sensor_msgs.msg import Image, PointCloud2, CameraInfo
+from sensor_msgs.msg import Image, CompressedImage, PointCloud2, CameraInfo
 from sensor_msgs_py import point_cloud2 as pc2
 
 from visualization_msgs.msg import Marker
@@ -16,18 +17,21 @@ from cv_bridge import CvBridge, CvBridgeError
 import cv2
 import numpy as np
 
-from ultralytics import YOLO
+try:
+	from ultralytics import YOLO
+except ImportError:
+	YOLO = None
 
 # from rclpy.parameter import Parameter
 # from rcl_interfaces.msg import SetParametersResult
 
 # ── Face detection tuning ────────────────────────────────────────────────────
-FACE_Y_FRAC        = 0.50  # bbox bottom edge must be below this fraction of image height
-                             # (rejects detections entirely above the border wall)
-FACE_CONFIRM_HITS  = 6      # frames a face must be seen before it is reported
+FACE_CONFIRM_HITS  = 5      # frames a face must be seen before it is reported
 FACE_MAX_MISSED    = 8      # frames without a match before dropping a candidate
 FACE_MATCH_DIST_PX = 50     # pixel radius to match detections across frames
 FACE_DEPTH_STD_MAX = 0.20   # max depth std-dev (m) within bbox — flat-wall / picture check
+FACE_ASPECT_MIN    = 0.65   # reject boxes that are not face-like
+FACE_ASPECT_MAX    = 1.55
 
 class detect_faces(Node):
 
@@ -39,12 +43,27 @@ class detect_faces(Node):
 			parameters=[
 				('device', ''),
 				('real_robot', False),
+				('detector_backend', 'yolo'),  # yolo with a face-specific .pt model, or haar
+				('face_model', ''),
+				('face_conf', 0.35),
+				('face_crop_top', 0.30),
+				('face_crop_bottom', 0.70),
 		])
 
 		marker_topic = "/people_marker"
 
 		self.detection_color = (0,0,255)
 		self.device = self.get_parameter('device').get_parameter_value().string_value
+		self.detector_backend = self.get_parameter('detector_backend').get_parameter_value().string_value.lower()
+		self.face_model_path = self.get_parameter('face_model').get_parameter_value().string_value
+		if self.detector_backend == 'yolo' and not self.face_model_path:
+			workspace_model = Path(__file__).resolve().parents[3] / 'models' / 'yolov8n-face-lindevs.pt'
+			self.face_model_path = str(workspace_model)
+		self.face_conf = self.get_parameter('face_conf').get_parameter_value().double_value
+		self.face_crop_top = self.get_parameter('face_crop_top').get_parameter_value().double_value
+		self.face_crop_bottom = self.get_parameter('face_crop_bottom').get_parameter_value().double_value
+		self.face_crop_top = float(np.clip(self.face_crop_top, 0.0, 0.95))
+		self.face_crop_bottom = float(np.clip(self.face_crop_bottom, self.face_crop_top + 0.05, 1.0))
 		real = self.get_parameter('real_robot').get_parameter_value().bool_value
 
 		# Robot state for conditional publishing
@@ -54,6 +73,13 @@ class detect_faces(Node):
 		self.bridge = CvBridge()
 		self.scan = None
 
+		# depth=1 so we always process the latest frame and never accumulate stale WiFi frames
+		_latest_qos = QoSProfile(
+			reliability=QoSReliabilityPolicy.BEST_EFFORT,
+			history=QoSHistoryPolicy.KEEP_LAST,
+			depth=1,
+		)
+
 		if self.real_robot:
 			# ── REAL ROBOT: depth image + camera intrinsics ──────────────────
 			self.rgb_image = None
@@ -61,22 +87,24 @@ class detect_faces(Node):
 			self.camera_intrinsics = None  # (fx, fy, ppx, ppy)
 			self.camera_frame_id = 'base_link'  # overwritten once camera_info arrives
 
+			# Use compressed topic over WiFi: ~10-20x less bandwidth than raw
 			self.rgb_image_sub = self.create_subscription(
-				Image, '/gemini/color/image_raw', self.rgb_callback, qos_profile_sensor_data)
+				CompressedImage, '/gemini/color/image_raw/compressed',
+				self.rgb_compressed_callback, _latest_qos)
 			self.depth_image_sub = self.create_subscription(
-				Image, '/gemini/depth/image_raw', self._real_depth_callback, qos_profile_sensor_data)
+				Image, '/gemini/depth/image_raw', self._real_depth_callback, _latest_qos)
 			self.camera_info_sub = self.create_subscription(
 				CameraInfo, '/gemini/color/camera_info', self._real_camera_info_callback, 10)
 			self.robot_state_sub = self.create_subscription(
 				String, "/robot_state", self.robot_state_callback, 10)
 
-			self.get_logger().info('[REAL] image=/gemini/color/image_raw  depth=/gemini/depth/image_raw')
+			self.get_logger().info('[REAL] image=/gemini/color/image_raw/compressed  depth=/gemini/depth/image_raw')
 		else:
 			# ── SIMULATION: organized point cloud ────────────────────────────
 			self.rgb_image_sub = self.create_subscription(
-				Image, '/oakd/rgb/preview/image_raw', self.rgb_callback, qos_profile_sensor_data)
+				Image, '/oakd/rgb/preview/image_raw', self.rgb_callback, _latest_qos)
 			self.pointcloud_sub = self.create_subscription(
-				PointCloud2, '/oakd/rgb/preview/depth/points', self.pointcloud_callback, qos_profile_sensor_data)
+				PointCloud2, '/oakd/rgb/preview/depth/points', self.pointcloud_callback, _latest_qos)
 			self.robot_state_sub = self.create_subscription(
 				String, "/robot_state", self.robot_state_callback, 10)
 
@@ -89,13 +117,15 @@ class detect_faces(Node):
 		)
 		self.marker_pub = self.create_publisher(Marker, marker_topic, _MARKER_QOS)
 
-		self.model = YOLO("yolov8m.pt")
+		self.model = None
+		self.face_cascade = None
+		self._init_face_detector()
 
 		self.faces = []
 		self._face_candidates = []   # cross-frame accumulator
 		self._faces_lock = threading.Lock()
 
-		# Worker thread: YOLOv8 inference runs here, never in the ROS callback
+		# Worker thread: face detection runs here, never in the ROS callback
 		self._latest_frame = None
 		self._frame_event = threading.Event()
 		self._frame_lock = threading.Lock()
@@ -104,6 +134,76 @@ class detect_faces(Node):
 
 		self.get_logger().info(f"Node has been initialized! Will publish face markers to {marker_topic}.")
 
+	def _init_face_detector(self):
+		if self.detector_backend == 'yolo':
+			if YOLO is None:
+				raise RuntimeError("detector_backend=yolo requires the ultralytics package.")
+			if not Path(self.face_model_path).is_file():
+				raise RuntimeError(f"YOLO face model not found: {self.face_model_path}")
+			self.model = YOLO(self.face_model_path)
+			device_name = self.device if self.device else 'cuda:0'
+			self.get_logger().info(
+				f"Using YOLO face detector model: {self.face_model_path} on device={device_name}")
+			# Pre-warm: transfer model weights to GPU now so the first real frame isn't slow
+			self.model.predict(
+				np.zeros((320, 320, 3), dtype=np.uint8),
+				imgsz=320, conf=0.5, verbose=False,
+				device=self.device if self.device else 'cuda:0')
+			self.get_logger().info("YOLO model warmed up on GPU.")
+			return
+
+		cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+		self.face_cascade = cv2.CascadeClassifier(cascade_path)
+		if self.face_cascade.empty():
+			raise RuntimeError(f"Could not load Haar face cascade from {cascade_path}")
+		self.detector_backend = 'haar'
+		self.get_logger().info(f"Using OpenCV Haar face detector: {cascade_path}")
+
+	def _detect_faces_in_crop(self, crop):
+		if self.detector_backend == 'yolo':
+			return self._detect_faces_yolo(crop)
+		return self._detect_faces_haar(crop)
+
+	def _detect_faces_yolo(self, crop):
+		results = self.model.predict(
+			crop, imgsz=320, conf=self.face_conf, show=False,
+			verbose=False, device=self.device if self.device else 'cuda:0')
+
+		detections = []
+		for result in results:
+			boxes = result.boxes.xyxy
+			if boxes.nelement() == 0:
+				continue
+
+			for bbox in boxes:
+				x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+				if self._is_face_like_box(x1, y1, x2, y2):
+					detections.append((x1, y1, x2, y2))
+		return detections
+
+	def _detect_faces_haar(self, crop):
+		gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+		gray = cv2.equalizeHist(gray)
+		faces = self.face_cascade.detectMultiScale(
+			gray,
+			scaleFactor=1.08,
+			minNeighbors=5,
+			minSize=(28, 28),
+			flags=cv2.CASCADE_SCALE_IMAGE)
+
+		detections = []
+		for (x, y, w, h) in faces:
+			x1, y1, x2, y2 = int(x), int(y), int(x + w), int(y + h)
+			if self._is_face_like_box(x1, y1, x2, y2):
+				detections.append((x1, y1, x2, y2))
+		return detections
+
+	def _is_face_like_box(self, x1, y1, x2, y2):
+		w = max(1, x2 - x1)
+		h = max(1, y2 - y1)
+		aspect = w / float(h)
+		return FACE_ASPECT_MIN <= aspect <= FACE_ASPECT_MAX
+
 	def rgb_callback(self, data):
 		try:
 			cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
@@ -111,6 +211,20 @@ class detect_faces(Node):
 			print(e)
 			return
 		# Store latest frame and wake the worker; old unprocessed frames are discarded
+		with self._frame_lock:
+			self._latest_frame = cv_image
+		self._frame_event.set()
+
+	def rgb_compressed_callback(self, data):
+		"""Decode a CompressedImage — much smaller over WiFi than raw Image."""
+		try:
+			np_arr = np.frombuffer(data.data, np.uint8)
+			cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+			if cv_image is None:
+				return
+		except Exception as e:
+			self.get_logger().error(f'Compressed image decode error: {e}')
+			return
 		with self._frame_lock:
 			self._latest_frame = cv_image
 		self._frame_event.set()
@@ -126,32 +240,22 @@ class detect_faces(Node):
 				continue
 
 			img_h, img_w = cv_image.shape[:2]
-
-			res = self.model.predict(cv_image, imgsz=640, conf=0.25, show=False, verbose=False, classes=[0], device=self.device)
+			crop_y0 = int(img_h * self.face_crop_top)
+			crop_y1 = int(img_h * self.face_crop_bottom)
+			crop = cv_image[crop_y0:crop_y1, :]
 
 			frame_detections = []
-			display_img = cv_image.copy()
+			display_img = crop.copy()
 
-			for x in res:
-				bboxes = x.boxes.xyxy
-				if bboxes.nelement() == 0:
-					continue
+			for x1, y1, x2, y2 in self._detect_faces_in_crop(crop):
+				cx = int((x1 + x2) / 2)
+				cy = int((y1 + y2) / 2)
 
-				for bbox in bboxes:
-					x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-					cx = int((x1 + x2) / 2)
-					cy = int((y1 + y2) / 2)
+				display_img = cv2.rectangle(display_img, (x1, y1), (x2, y2), (0, 255, 0), 3)
+				display_img = cv2.circle(display_img, (cx, cy), 5, (0, 255, 0), -1)
 
-					accepted = y2 >= int(img_h * FACE_Y_FRAC)
-
-					colour = (0, 255, 0) if accepted else (0, 0, 255)
-					display_img = cv2.rectangle(display_img, (x1, y1), (x2, y2), colour, 3)
-					display_img = cv2.circle(display_img, (cx, cy), 5, colour, -1)
-
-					if not accepted:
-						continue
-
-					frame_detections.append((cx, cy, x1, y1, x2, y2))
+				# Offset y back to original image coordinates for depth/pointcloud lookup
+				frame_detections.append((cx, cy + crop_y0, x1, y1 + crop_y0, x2, y2 + crop_y0))
 
 			matched = set()
 			for det in frame_detections:
@@ -183,7 +287,7 @@ class detect_faces(Node):
 			with self._faces_lock:
 				self.faces = confirmed
 			if confirmed:
-				self.get_logger().info(f"Person confirmed in view ({len(confirmed)} face(s))")
+				self.get_logger().info(f"Face confirmed in view ({len(confirmed)} face(s))")
 
 			try:
 				cv2.imshow("image", display_img)
@@ -200,11 +304,14 @@ class detect_faces(Node):
 						disp_8u = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 						disp_bgr = cv2.cvtColor(disp_8u, cv2.COLOR_GRAY2BGR)
 						dh, dw = disp_bgr.shape[:2]
+						d_crop_y0 = int(dh * self.face_crop_top)
+						d_crop_y1 = int(dh * self.face_crop_bottom)
+						disp_crop = disp_bgr[d_crop_y0:d_crop_y1, :]
 						for (fx, fy, *_) in confirmed:
-							cv2.circle(disp_bgr,
-									   (int(fx * dw / img_w), int(fy * dh / img_h)),
+							cv2.circle(disp_crop,
+									   (int(fx * dw / img_w), int(fy * dh / img_h) - d_crop_y0),
 									   8, (0, 255, 0), 2)
-						cv2.imshow("Disparity (faces)", disp_bgr)
+						cv2.imshow("Disparity (faces)", disp_crop)
 
 				key = cv2.waitKey(1)
 				if key == 27:
@@ -216,9 +323,10 @@ class detect_faces(Node):
 			# ── REAL ROBOT: publish face markers from depth image ─────────
 			if self.real_robot:
 				self.rgb_image = cv_image
-				for i, det in enumerate(confirmed):
-					dcx, dcy, dx1, dy1, dx2, dy2 = det
-					self._real_publish_face_marker(dcx, dcy, dx1, dy1, dx2, dy2, marker_id=i)
+				if self.robot_state == 'PATROL':
+					for i, det in enumerate(confirmed):
+						dcx, dcy, dx1, dy1, dx2, dy2 = det
+						self._real_publish_face_marker(dcx, dcy, dx1, dy1, dx2, dy2, marker_id=i)
 
 	def robot_state_callback(self, data):
 		"""Update robot state for conditional marker publishing."""
