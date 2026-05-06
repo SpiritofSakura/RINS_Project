@@ -32,6 +32,7 @@ setup(
             'robot_state_overlay = task1.robot_state_overlay:main',
             'behavior_manager = task1.behavior_manager:main',
             'detect_rings_v2 = task1.detect_rings_v2:main',
+            'hsv_calibrator = task1.hsv_calibrator:main',
         ],
     },
 )

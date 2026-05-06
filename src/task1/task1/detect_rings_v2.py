@@ -11,12 +11,15 @@ Strategy:
   6. Publish marker with colour and /ring_colour String topic
 """
 
+import copy
+import os
 import threading
 
 import rclpy
 from rclpy.node import Node
 import cv2
 import numpy as np
+import yaml
 from sensor_msgs.msg import Image, CompressedImage, PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
 from cv_bridge import CvBridge, CvBridgeError
@@ -24,6 +27,8 @@ from visualization_msgs.msg import Marker
 from std_msgs.msg import String
 from builtin_interfaces.msg import Duration
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+
+CALIB_PATH = os.path.expanduser("~/.ros/ring_hsv_calibration.yaml")
 
 # ── QoS ───────────────────────────────────────────────────────────────────────
 SENSOR_QOS = QoSProfile(
@@ -37,7 +42,7 @@ HOUGH_DP = 1                    # Inverse ratio of accumulator resolution
 HOUGH_MIN_DIST = 80             # Minimum distance between circle centres
 HOUGH_PARAM1 = 48               # Upper threshold for Canny edge (balanced strictness)
 HOUGH_PARAM2 = 25               # Accumulator threshold (sim)
-HOUGH_PARAM2_REAL = 45          # Accumulator threshold (real robot)
+HOUGH_PARAM2_REAL = 40          # Accumulator threshold (real robot)
 HOUGH_MIN_RADIUS = 1            # Minimum circle radius in pixels (lowered to detect black ring)
 HOUGH_MAX_RADIUS = 150          # Maximum circle radius (px)
 
@@ -129,6 +134,15 @@ class RingDetectorV2(Node):
             pc_topic    = '/oakd/rgb/preview/depth/points'
 
         self.real_robot = real
+
+        # Load calibrated HSV ranges (real robot) or fall back to hardcoded defaults
+        if real:
+            self.colour_ranges = self._load_colour_ranges()
+        else:
+            self.colour_ranges = {
+                c: [(lo, hi) for lo, hi in ranges]
+                for c, ranges in COLOUR_RANGES.items()
+            }
 
         # Real robot: camera intrinsics for depth back-projection
         self.camera_intrinsics = None   # (fx, fy, ppx, ppy)
@@ -291,7 +305,7 @@ class RingDetectorV2(Node):
         if self.real_robot:
             hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
             colour_mask = np.zeros(cv_image.shape[:2], dtype=np.uint8)
-            for ranges in COLOUR_RANGES_REAL.values():
+            for ranges in self.colour_ranges.values():
                 for lo, hi in ranges:
                     colour_mask |= cv2.inRange(hsv, lo, hi)
             colour_mask = cv2.morphologyEx(
@@ -402,7 +416,9 @@ class RingDetectorV2(Node):
         valid_centre = centre_pixels[centre_pixels > 0.1]
         centre_median = float(np.median(valid_centre)) if len(valid_centre) > 0 else MAX_RANGE_M
 
-        hollow = invalid_frac > 0.25 or centre_median > rim_median + 0.05
+        # Relaxed hollowness: real rings hang close to walls so depth difference can be tiny.
+        # Accept if centre is even slightly farther, or if >10% of centre pixels are invalid.
+        hollow = invalid_frac > 0.10 or centre_median > rim_median + 0.02
         if not hollow:
             return None
 
@@ -437,35 +453,41 @@ class RingDetectorV2(Node):
 
     def _classify_ring_colour_with_mask(self, ring_patch, patch_mask):
         """
-        Classify ring colour using only pixels where patch_mask is active (255).
-        This filters out the grey holder and other non-ring material.
-        Uses mean colour of masked pixels.
+        Classify ring colour by counting how many ring pixels (patch_mask==255)
+        match each colour's calibrated HSV range.  Uses self.colour_ranges which
+        is loaded from ~/.ros/ring_hsv_calibration.yaml if available.
         """
         if ring_patch.size == 0 or patch_mask.size == 0:
             return "unknown"
 
-        mask_pixels = patch_mask == 255
-        masked_patch = ring_patch[mask_pixels]
-
-        if len(masked_patch) < 10:
+        roi_mask = (patch_mask == 255).astype(np.uint8) * 255
+        total = int(roi_mask.sum() // 255)
+        if total < 10:
             return "unknown"
 
-        mean_bgr = np.mean(masked_patch, axis=0).astype(np.uint8)
+        hsv_patch = cv2.cvtColor(ring_patch, cv2.COLOR_BGR2HSV)
 
-        bgr_array = np.uint8([[[mean_bgr[0], mean_bgr[1], mean_bgr[2]]]])
-        hsv = cv2.cvtColor(bgr_array, cv2.COLOR_BGR2HSV)[0, 0]
-        h, s, v = hsv
+        best_colour = "unknown"
+        best_count  = 0
 
-        if s < 50:
-            return "black"
-        elif 0 <= h < 10 or 170 <= h <= 180:
-            return "red"
-        elif 32 <= h < 85:
-            return "green"
-        elif 100 <= h < 130:
-            return "blue"
-        else:
-            return "unknown"
+        # Check all colours except black — black is determined by exclusion
+        for colour, ranges in self.colour_ranges.items():
+            if colour == "black":
+                continue
+            colour_mask = np.zeros(ring_patch.shape[:2], dtype=np.uint8)
+            for lo, hi in ranges:
+                colour_mask |= cv2.inRange(hsv_patch, np.array(lo), np.array(hi))
+            count = int(cv2.bitwise_and(colour_mask, roi_mask).sum() // 255)
+            if count > best_count:
+                best_count  = count
+                best_colour = colour
+
+        # Require at least 8% of masked pixels to match a colour
+        if best_count >= max(10, int(total * 0.08)):
+            return best_colour
+
+        # No colour matched well enough — classify as black by exclusion
+        return "black"
 
     def _classify_ring_colour(self, ring_patch):
         """
@@ -587,6 +609,30 @@ class RingDetectorV2(Node):
         except Exception as e:
             self.get_logger().warn(f"Failed to classify PC RGB: {e}")
             return "unknown"
+
+    def _load_colour_ranges(self):
+        """
+        Load HSV ranges from CALIB_PATH if it exists, otherwise fall back to
+        COLOUR_RANGES_REAL.  Returned dict maps colour name → list of (lo, hi)
+        numpy-array tuples, matching the format of COLOUR_RANGES_REAL.
+        """
+        if os.path.exists(CALIB_PATH):
+            try:
+                with open(CALIB_PATH) as f:
+                    data = yaml.safe_load(f)
+                result = {
+                    colour: [(np.array(r['lo']), np.array(r['hi'])) for r in ranges]
+                    for colour, ranges in data.items()
+                }
+                self.get_logger().info(
+                    f"[REAL] Loaded HSV calibration from {CALIB_PATH}")
+                return result
+            except Exception as e:
+                self.get_logger().warn(
+                    f"Could not load HSV calibration ({e}) — using built-in defaults")
+        self.get_logger().info(
+            f"[REAL] No calibration file found at {CALIB_PATH} — using built-in defaults")
+        return {c: list(r) for c, r in COLOUR_RANGES_REAL.items()}
 
     def _real_camera_info_callback(self, data):
         """Store camera intrinsics and frame_id once."""
