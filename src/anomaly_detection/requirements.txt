@@ -1,0 +1,2 @@
+anomalib[full]
+opencv-python

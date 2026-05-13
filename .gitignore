@@ -55,3 +55,11 @@ build/
 # Explicit ignores
 # =========================
 terminal.sh
+
+# =========================
+# Anomaly detection
+# =========================
+src/anomaly_detection/data/
+src/anomaly_detection/.venv/
+src/anomaly_detection/results/
+src/anomaly_detection/eval_output/
