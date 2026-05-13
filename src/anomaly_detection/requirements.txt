@@ -1,2 +1,4 @@
 anomalib[full]
 opencv-python
+segmentation-models-pytorch
+albumentations
