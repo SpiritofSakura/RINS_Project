@@ -55,3 +55,4 @@ build/
 # Explicit ignores
 # =========================
 terminal.sh
+.venv/
