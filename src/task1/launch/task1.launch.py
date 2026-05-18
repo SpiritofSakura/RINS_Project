@@ -31,6 +31,13 @@ def generate_launch_description():
         name='face_localizator',
     )
 
+    face_recognizer_node = Node(
+        package='task1',
+        executable='face_recognizer',
+        name='face_recognizer',
+        output='screen',
+    )
+
 
     ring_localizator_node = Node(
         package='task1',
@@ -74,6 +81,7 @@ def generate_launch_description():
     ld = LaunchDescription([
         detect_people_node,
         face_localizator_node,
+        face_recognizer_node,
         robot_state_overlay_node,
         behavior_manager_node,
         waypoint_navigator_node,
