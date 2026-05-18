@@ -80,6 +80,15 @@ class BehaviorManager(Node):
             "This appears to be a {color} ring. Impressive.",
         ]
 
+        self.cylinder_lines = [
+            "I found a {color} cylinder. How cylindrical.",
+            "Behold. A {color} cylinder.",
+            "This cylinder is {color}. Notable.",
+            "A {color} cylinder has been detected.",
+            "I found a {color} cylinder. Very geometric.",
+            "A {color} cylinder. Structurally sound.",
+        ]
+
         qos_latched = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -121,6 +130,13 @@ class BehaviorManager(Node):
             Marker,
             '/detected_ring_locations',
             self.ring_callback,
+            10
+        )
+
+        self.cylinder_subscriber = self.create_subscription(
+            Marker,
+            '/detected_cylinder_locations',
+            self.cylinder_callback,
             10
         )
 
@@ -235,6 +251,10 @@ class BehaviorManager(Node):
         template = random.choice(self.ring_lines)
         return template.format(color=color)
 
+    def random_cylinder_line(self, color):
+        template = random.choice(self.cylinder_lines)
+        return template.format(color=color)
+
     def start_interaction(self):
         self.interaction_active = True
         self.interaction_end_time = self.get_clock().now().nanoseconds + int(self.interaction_duration * 1e9)
@@ -276,13 +296,19 @@ class BehaviorManager(Node):
                     else:
                         self.speak_text('I found a ring. Quite mysterious.')
 
+                elif self.current_state == 'INTERACT_CYLINDER':
+                    if self.active_target is not None and 'color' in self.active_target:
+                        self.speak_text(self.random_cylinder_line(self.active_target['color']))
+                    else:
+                        self.speak_text('I found a cylinder. Remarkable.')
+
                 self.finish_interaction()
             return
 
         # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
         # This is a FAILSAFE that cancels the stuck nav goal and forces interaction to start
         if self.approach_start_time is not None and self.active_target is not None:
-            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING') and self.nav_goal_type in ('approach_face', 'approach_ring'):
+            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING', 'APPROACH_CYLINDER') and self.nav_goal_type in ('approach_face', 'approach_ring', 'approach_cylinder'):
                 elapsed = (self.get_clock().now().nanoseconds - self.approach_start_time) / 1e9
                 if elapsed >= self.approach_timeout:
                     self.get_logger().warn(
@@ -293,6 +319,8 @@ class BehaviorManager(Node):
                     # Gracefully transition to interact - use same interaction flow as normal
                     if self.current_state == 'APPROACH_FACE':
                         self.publish_state('INTERACT_FACE')
+                    elif self.current_state == 'APPROACH_CYLINDER':
+                        self.publish_state('INTERACT_CYLINDER')
                     else:  # APPROACH_RING
                         self.publish_state('INTERACT_RING')
                     self.start_interaction()
@@ -328,6 +356,11 @@ class BehaviorManager(Node):
             elif nav_goal_type == 'approach_ring':
                 self.publish_state('INTERACT_RING')
                 self.get_logger().info('Reached ring target. Starting interaction.')
+                self.start_interaction()
+
+            elif nav_goal_type == 'approach_cylinder':
+                self.publish_state('INTERACT_CYLINDER')
+                self.get_logger().info('Reached cylinder target. Starting interaction.')
                 self.start_interaction()
 
             elif nav_goal_type == 'return_to_patrol':
@@ -484,6 +517,14 @@ class BehaviorManager(Node):
                     self.publish_state('APPROACH_RING', force_publish)
                 return
 
+            if self.nav_goal_type == 'approach_cylinder' or self.current_state == 'INTERACT_CYLINDER':
+                self.publish_patrol_enabled(False)
+                if self.current_state == 'INTERACT_CYLINDER':
+                    self.publish_state('INTERACT_CYLINDER', force_publish)
+                else:
+                    self.publish_state('APPROACH_CYLINDER', force_publish)
+                return
+
             if self.active_target['type'] == 'face':
                 self.publish_patrol_enabled(False)
                 self.publish_state('APPROACH_FACE', force_publish)
@@ -492,6 +533,11 @@ class BehaviorManager(Node):
             if self.active_target['type'] == 'ring':
                 self.publish_patrol_enabled(False)
                 self.publish_state('APPROACH_RING', force_publish)
+                return
+
+            if self.active_target['type'] == 'cylinder':
+                self.publish_patrol_enabled(False)
+                self.publish_state('APPROACH_CYLINDER', force_publish)
                 return
 
         if self.patrol_requested and not self.patrol_finished:
@@ -535,7 +581,7 @@ class BehaviorManager(Node):
         self.publish_patrol_enabled(False)
 
         goal_x, goal_y, goal_yaw = approach
-        nav_goal_type = 'approach_face' if target_type == 'face' else 'approach_ring'
+        nav_goal_type = {'face': 'approach_face', 'ring': 'approach_ring', 'cylinder': 'approach_cylinder'}.get(target_type, 'approach_ring')
 
         if not self.send_nav_goal(goal_x, goal_y, goal_yaw, nav_goal_type):
             self.active_target = None
@@ -592,12 +638,33 @@ class BehaviorManager(Node):
         # Queue the detection; it will be processed in main_loop when AMCL is ready
         self.pending_targets.append({'type': 'ring', 'x': x, 'y': y, 'z': z, 'color': color})
 
+    def cylinder_callback(self, msg: Marker):
+        if self.current_state not in ('PATROL', 'IDLE'):
+            return
+
+        if self.active_target is not None:
+            return
+
+        x = msg.pose.position.x
+        y = msg.pose.position.y
+        z = msg.pose.position.z
+
+        if self.is_already_handled('cylinder', x, y):
+            return
+
+        color = self.marker_to_ring_color(msg)
+
+        if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'cylinder' for t in self.pending_targets):
+            return
+
+        self.pending_targets.append({'type': 'cylinder', 'x': x, 'y': y, 'z': z, 'color': color})
+
     def target_done_callback(self, msg: Empty):
         if self.active_target is None:
             self.get_logger().info('No active target to mark as done.')
             return
 
-        if self.current_state not in ('INTERACT_FACE', 'INTERACT_RING', 'APPROACH_FACE', 'APPROACH_RING'):
+        if self.current_state not in ('INTERACT_FACE', 'INTERACT_RING', 'INTERACT_CYLINDER', 'APPROACH_FACE', 'APPROACH_RING', 'APPROACH_CYLINDER'):
             self.get_logger().info('Target done received, but current state is not target handling.')
             return
 

@@ -34,6 +34,8 @@ setup(
             'behavior_manager = task1.behavior_manager:main',
             'detect_rings_v2 = task1.detect_rings_v2:main',
             'face_recognizer = task1.face_recognizer:main',
+            'cylinder_localizator = task1.cylinder_localizator:main',
+            'cylinder_debug_view = task1.cylinder_debug_view:main',
         ],
     },
 )

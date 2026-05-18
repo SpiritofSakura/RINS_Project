@@ -23,6 +23,20 @@ def generate_launch_description():
         output='screen',
     )
 
+    cylinder_segmentation_node = Node(
+        package='dis_tutorial5',
+        executable='cylinder_segmentation',
+        name='cylinder_segmentation',
+        output='screen',
+    )
+
+    cylinder_localizator_node = Node(
+        package='task1',
+        executable='cylinder_localizator',
+        name='cylinder_localizator',
+        output='screen',
+    )
+
 
     # Nodes from task1 package
     face_localizator_node = Node(
@@ -66,7 +80,7 @@ def generate_launch_description():
         output='screen',
     )
     
-    # Delay ring detector and localizator startup by 6 seconds
+    # Delay detectors and localizators by 6 seconds (wait for TF + sensors)
     delayed_detect_rings = TimerAction(
         period=6.0,
         actions=[detect_rings_node],
@@ -76,7 +90,17 @@ def generate_launch_description():
         period=6.0,
         actions=[ring_localizator_node],
     )
-    
+
+    delayed_cylinder_segmentation = TimerAction(
+        period=6.0,
+        actions=[cylinder_segmentation_node],
+    )
+
+    delayed_cylinder_localizator = TimerAction(
+        period=6.0,
+        actions=[cylinder_localizator_node],
+    )
+
     # Create launch description and add all nodes
     ld = LaunchDescription([
         detect_people_node,
@@ -87,6 +111,8 @@ def generate_launch_description():
         waypoint_navigator_node,
         delayed_detect_rings,
         delayed_ring_localizator,
+        delayed_cylinder_segmentation,
+        delayed_cylinder_localizator,
     ])
     
     return ld

@@ -29,23 +29,23 @@ std::shared_ptr<rclcpp::Node> node;
 std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
 std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
 
-typedef pcl::PointXYZ PointT;
+typedef pcl::PointXYZRGB PointT;
 
 // parameters
-float error_margin = 0.04;  // 4 cm margin for radius error
+float error_margin = 0.025; // tight radius margin — reduces wall-corner false positives
 float target_radius = 0.11; // 11cm radius
 bool verbose = false;
 
 // cloud filtering
 float x_limit_low = 0;
-float x_limit_high = 3;
-float z_limit_low = -0.2;
-float z_limit_high = 0.3;
+float x_limit_high = 2.5;   // only look within 2.5m
+float z_limit_low = -0.5;
+float z_limit_high = 0.5;
 
 // RANSAC
-int ransac_max_iterations = 50;
-float ransac_normal_distance_weight = 0.3;
-float ransac_distance_threshold = 0.005;
+int ransac_max_iterations = 100;
+float ransac_normal_distance_weight = 0.1;
+float ransac_distance_threshold = 0.01;
 
 float marker_height = 0.4;
 int max_detected_cylinders = 3;
@@ -100,16 +100,39 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         std::cerr << "PointCloud after filtering has: " << cloud_filtered->points.size() << " data points." << std::endl;
     }
 
-    // Estimate point normals
+    // Remove dominant planes (floor, walls) before cylinder detection.
+    // Without this, RANSAC happily fits wall corners and table edges as "cylinders".
+    {
+        pcl::SACSegmentation<PointT> plane_seg;
+        plane_seg.setOptimizeCoefficients(true);
+        plane_seg.setModelType(pcl::SACMODEL_PLANE);
+        plane_seg.setMethodType(pcl::SAC_RANSAC);
+        plane_seg.setDistanceThreshold(0.02);
+        plane_seg.setMaxIterations(100);
+
+        pcl::ExtractIndices<PointT> ex;
+        for (int p = 0; p < 3 && cloud_filtered->size() > 300; ++p) {
+            pcl::PointIndices::Ptr plane_inl(new pcl::PointIndices);
+            pcl::ModelCoefficients::Ptr plane_coef(new pcl::ModelCoefficients);
+            plane_seg.setInputCloud(cloud_filtered);
+            plane_seg.segment(*plane_inl, *plane_coef);
+            if (plane_inl->indices.size() < 300) break;
+            pcl::PointCloud<PointT>::Ptr tmp(new pcl::PointCloud<PointT>);
+            ex.setInputCloud(cloud_filtered);
+            ex.setIndices(plane_inl);
+            ex.setNegative(true);
+            ex.filter(*tmp);
+            cloud_filtered.swap(tmp);
+        }
+    }
+
+    // Estimate point normals on plane-removed cloud
     ne.setSearchMethod(tree);
     ne.setInputCloud(cloud_filtered);
     ne.setKSearch(50);
     ne.compute(*cloud_normals);
 
-    // limit to upwards orientation
-    Eigen::Vector3f axis(0.0, 0.0, 1.0);
-    seg.setAxis(axis);
-    seg.setEpsAngle(0.8);
+    // No axis constraint — allow vertical and horizontal cylinders
 
     // Create the segmentation object for cylinder segmentation and set all the parameters
     seg.setOptimizeCoefficients(true);
@@ -121,7 +144,6 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     seg.setRadiusLimits(target_radius-error_margin, target_radius+error_margin);
     seg.setInputCloud(cloud_filtered);
     seg.setInputNormals(cloud_normals);
-    seg.setAxis(axis);
 
     // Obtain the cylinder inliers and coefficients
     seg.segment(*inliers_cylinder, *coefficients_cylinder);
@@ -157,6 +179,13 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
 
         float detected_radius = coefficients_cylinder->values[6];
         int cylinder_points_count = inliers_cylinder->indices.size();
+
+        // Classify orientation from axis direction (values[3..5])
+        float ax = coefficients_cylinder->values[3];
+        float ay = coefficients_cylinder->values[4];
+        float az = coefficients_cylinder->values[5];
+        float axis_len = std::sqrt(ax*ax + ay*ay + az*az);
+        bool is_vertical = (axis_len > 0) ? (std::abs(az / axis_len) > 0.5f) : true;
 
         // Extract cylinder
         pcl::PointCloud<PointT>::Ptr cloud_cylinder(new pcl::PointCloud<PointT>());
@@ -211,10 +240,20 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
             marker.scale.y = detected_radius * 2;
             marker.scale.z = marker_height;
 
-            marker.color.r = 0.0f;
-            marker.color.g = 1.0f;
-            marker.color.b = 0.0f;
+            // Compute average colour from cylinder point cloud
+            float sum_r = 0.0f, sum_g = 0.0f, sum_b = 0.0f;
+            for (const auto& pt : *cloud_cylinder) {
+                sum_r += static_cast<float>(pt.r);
+                sum_g += static_cast<float>(pt.g);
+                sum_b += static_cast<float>(pt.b);
+            }
+            marker.color.r = sum_r / cylinder_points_count / 255.0f;
+            marker.color.g = sum_g / cylinder_points_count / 255.0f;
+            marker.color.b = sum_b / cylinder_points_count / 255.0f;
             marker.color.a = 1.0f;
+
+            // Encode orientation in marker.text — read by cylinder_localizator
+            marker.text = is_vertical ? "vertical" : "horizontal";
 
             marker.lifetime = rclcpp::Duration(0, 1);
 
