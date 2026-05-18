@@ -55,6 +55,8 @@ build/
 # Explicit ignores
 # =========================
 terminal.sh
+.venv/
+src/rviz_2d_overlay_plugins/
 
 # =========================
 # Anomaly detection
