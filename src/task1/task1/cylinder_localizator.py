@@ -12,12 +12,16 @@ import os
 from collections import Counter
 from datetime import datetime
 
+import cv2
+import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 from visualization_msgs.msg import Marker
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
@@ -30,6 +34,19 @@ MAX_RAW_PTS         = 300
 
 REPORT_DIR = os.path.expanduser("~/RINS_report")
 REPORT_JSON = os.path.join(REPORT_DIR, "barrel_report.json")
+
+# Spill detection — HSV ranges (OpenCV: H 0-180, S/V 0-255)
+# Red has two ranges because it wraps around H=0/180
+COLOR_HSV_RANGES = {
+    "red":    [( 0, 100, 80), (10, 255, 255), (170, 100, 80), (180, 255, 255)],
+    "green":  [(40, 100, 80), (80, 255, 255)],
+    "blue":   [(100, 100, 80), (130, 255, 255)],
+    "yellow": [(20, 100, 80), (35, 255, 255)],
+    "orange": [(10, 100, 80), (20, 255, 255)],
+    "black":  [( 0,   0,  0), (180, 255, 50)],
+}
+SPILL_PIXEL_THRESHOLD = 500   # matching pixels in top-cam image → spill confirmed
+ARM_MOVE_WAIT_SECS    = 4     # seconds to wait after publishing arm command
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -101,11 +118,11 @@ class CylinderLocalizator(Node):
     def __init__(self):
         super().__init__("cylinder_localizator")
 
-        os.makedirs(REPORT_DIR, exist_ok=True)
-        self._load_report()
+        self._reset_report()
 
         self.bridge = CvBridge()
         self.latest_image = None
+        self.top_camera_image = None
 
         self.marker_sub = self.create_subscription(
             Marker, "cylinder_markers", self.marker_callback, SENSOR_QOS
@@ -113,12 +130,23 @@ class CylinderLocalizator(Node):
         self.image_sub = self.create_subscription(
             Image, "/oakd/rgb/preview/image_raw", self._image_callback, SENSOR_QOS
         )
+        self.top_camera_sub = self.create_subscription(
+            Image, "/top_camera/rgb/preview/image_raw", self._top_camera_cb, SENSOR_QOS
+        )
         self.cylinder_locations_pub = self.create_publisher(
             Marker, "/detected_cylinder_locations", 10
         )
+        self.arm_command_pub = self.create_publisher(String, "/arm_command", 1)
 
         self.clusters: list[Cluster] = []
         self.marker_id_counter = 0
+
+        # Spill check state machine
+        self._spill_queue: list[tuple] = []  # (barrel_id, colour)
+        self._spill_state = "idle"           # idle → moving → capturing → returning
+        self._spill_wait = 0
+        self._current_spill: tuple | None = None
+        self.create_timer(1.0, self._spill_timer_cb)
 
         self.get_logger().info(
             f"CylinderLocalizator ready — report: {REPORT_JSON}"
@@ -131,7 +159,21 @@ class CylinderLocalizator(Node):
         except CvBridgeError:
             pass
 
+    def _top_camera_cb(self, msg: Image):
+        try:
+            self.top_camera_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except CvBridgeError:
+            pass
+
     # ── Report persistence ────────────────────────────────────────────────────
+    def _reset_report(self):
+        import shutil
+        if os.path.exists(REPORT_DIR):
+            shutil.rmtree(REPORT_DIR)
+        os.makedirs(REPORT_DIR, exist_ok=True)
+        self.report = {"barrels": []}
+        self._save_report()
+
     def _load_report(self):
         if os.path.exists(REPORT_JSON):
             with open(REPORT_JSON, "r") as f:
@@ -203,17 +245,99 @@ class CylinderLocalizator(Node):
             self.get_logger().warn(
                 f"⚠  WARNING: Barrel #{barrel_id} ({colour}) is HORIZONTAL — possible leak!"
             )
+            self._spill_queue.append((barrel_id, colour))
 
         image_path = self._save_image(barrel_id, leak)
         self._log_barrel(barrel_id, colour, orientation, leak, cx, cy, image_path)
         self._publish_marker(barrel_id, cx, cy, cz, colour, orientation)
+
+    # ── Spill detection ───────────────────────────────────────────────────────
+    def _publish_arm(self, cmd: str):
+        msg = String()
+        msg.data = cmd
+        self.arm_command_pub.publish(msg)
+
+    def _spill_timer_cb(self):
+        if self._spill_state == "idle":
+            if self._spill_queue:
+                self._current_spill = self._spill_queue.pop(0)
+                barrel_id, colour = self._current_spill
+                self.get_logger().info(
+                    f"Spill check: moving arm for barrel #{barrel_id} ({colour})"
+                )
+                self._publish_arm("look_for_spill")
+                self._spill_state = "moving"
+                self._spill_wait = 0
+
+        elif self._spill_state == "moving":
+            self._spill_wait += 1
+            if self._spill_wait >= ARM_MOVE_WAIT_SECS:
+                self._check_spill()
+                self._publish_arm("garage")
+                self._spill_state = "returning"
+                self._spill_wait = 0
+
+        elif self._spill_state == "returning":
+            self._spill_wait += 1
+            if self._spill_wait >= ARM_MOVE_WAIT_SECS:
+                self._spill_state = "idle"
+
+    def _check_spill(self):
+        barrel_id, colour = self._current_spill
+
+        if self.top_camera_image is None:
+            self.get_logger().warn(f"Spill check barrel #{barrel_id}: no top camera image")
+            return
+
+        img = self.top_camera_image.copy()
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+        ranges = COLOR_HSV_RANGES.get(colour)
+        if ranges is None:
+            self.get_logger().warn(f"No HSV range defined for colour '{colour}'")
+            return
+
+        if colour == "red":
+            mask = cv2.bitwise_or(
+                cv2.inRange(hsv, np.array(ranges[0]), np.array(ranges[1])),
+                cv2.inRange(hsv, np.array(ranges[2]), np.array(ranges[3])),
+            )
+        else:
+            mask = cv2.inRange(hsv, np.array(ranges[0]), np.array(ranges[1]))
+
+        pixel_count = int(cv2.countNonZero(mask))
+        spill_detected = pixel_count >= SPILL_PIXEL_THRESHOLD
+
+        self.get_logger().info(
+            f"Spill check barrel #{barrel_id} ({colour}): "
+            f"{pixel_count} px → {'SPILL DETECTED' if spill_detected else 'no spill'}"
+        )
+        if spill_detected:
+            self.get_logger().warn(
+                f"⚠  SPILL confirmed for barrel #{barrel_id} ({colour})!"
+            )
+
+        for entry in self.report["barrels"]:
+            if entry["id"] == barrel_id:
+                entry["spill_detected"] = spill_detected
+                entry["spill_pixel_count"] = pixel_count
+                break
+        self._save_report()
+
+        if spill_detected:
+            fname = (
+                f"barrel_{barrel_id}_SPILL_{colour.upper()}_"
+                f"{datetime.now().strftime('%H%M%S')}.jpg"
+            )
+            path = os.path.join(REPORT_DIR, fname)
+            cv2.imwrite(path, img)
+            self.get_logger().info(f"Spill image saved: {path}")
 
     # ── Image saving ──────────────────────────────────────────────────────────
     def _save_image(self, barrel_id, leak):
         if self.latest_image is None:
             return None
         try:
-            import cv2
             suffix = "_LEAK" if leak else ""
             fname = f"barrel_{barrel_id}{suffix}_{datetime.now().strftime('%H%M%S')}.jpg"
             path = os.path.join(REPORT_DIR, fname)

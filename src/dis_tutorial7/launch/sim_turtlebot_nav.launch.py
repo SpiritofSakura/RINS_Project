@@ -55,6 +55,8 @@ def generate_launch_description():
         [pkg_dis_tutorial3, 'launch', 'sim.launch.py'])
     robot_spawn_launch = PathJoinSubstitution(
         [package_dir_robot, 'launch', 'turtlebot4_spawn.launch.py'])
+    control_launch = PathJoinSubstitution(
+        [package_dir_robot, 'launch', 'control.launch.py'])
     localization_launch = PathJoinSubstitution(
         [pkg_dis_tutorial3, 'launch', 'localization.launch.py'])
     nav2_launch = PathJoinSubstitution(
@@ -104,10 +106,17 @@ def generate_launch_description():
         ]
     )
 
+    # Arm + drive controllers
+    control = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([control_launch]),
+        launch_arguments=[('namespace', namespace)]
+    )
+
     # Create launch description and add actions
     ld = LaunchDescription(ARGUMENTS)
     ld.add_action(ignition)
     ld.add_action(robot_spawn)
+    ld.add_action(control)
     ld.add_action(localization)
     ld.add_action(nav2)
     return ld

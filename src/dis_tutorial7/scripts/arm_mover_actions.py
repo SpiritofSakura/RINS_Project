@@ -44,6 +44,7 @@ class ArmMoverAction(Node):
             'look_at_belt_right':[-1.57,0.9,0.3,1.7],
             'look_at_belt_left':[1.57,0.9,0.3,1.7],
             'look_for_qr':[0.,0.6,0.5,2.0],
+            'look_for_spill':[0.,0.6,0.5,2.0],
             'garage':[0.,-0.45,2.8,-0.8],
             'up':[0.,0.,0.,0.],
             'manual':None
