@@ -87,18 +87,7 @@ class CylinderDebugView(Node):
         )
 
         self.debug_pub = self.create_publisher(Image, "/cylinder_debug_image", 10)
-
-        # Periodic status log so we can see if K / camera_frame are set
-        self.create_timer(3.0, self._status_log)
         self.get_logger().info("CylinderDebugView ready")
-
-    def _status_log(self):
-        self.get_logger().info(
-            f"[debug] K={'set' if self.K is not None else 'MISSING'}, "
-            f"camera_frame={self.camera_frame!r}, "
-            f"text_dets={len(self.text_detections)}, "
-            f"circles={len(self.circle_overlays)}"
-        )
 
     # ── Camera image ──────────────────────────────────────────────────────────
     def _image_cb(self, msg: Image):
@@ -124,6 +113,8 @@ class CylinderDebugView(Node):
         colour = _rgb_to_name(msg.color.r, msg.color.g, msg.color.b)
         orientation = msg.text if msg.text in ("vertical", "horizontal") else "vertical"
         now = self.get_clock().now()
+
+        self.get_logger().info(f"Cylinder detected: {colour}")
 
         # Layer 1: always record (text banner, no TF needed)
         self.text_detections.append({
@@ -218,13 +209,6 @@ class CylinderDebugView(Node):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, bgr, 2, cv2.LINE_AA)
                 y_pos += 26
 
-            if not fresh_circles:
-                note = "(TF fail - no circle projection)"
-                cv2.putText(img, note, (10, y_pos),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 200), 1, cv2.LINE_AA)
-        else:
-            cv2.putText(img, "no raw cylinder detections", (10, y_pos),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1, cv2.LINE_AA)
 
         cv2.imshow("Cylinder Debug", img)
         cv2.waitKey(1)
@@ -244,8 +228,11 @@ def main():
         pass
     finally:
         cv2.destroyAllWindows()
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+            rclpy.shutdown()
+        except BaseException:
+            pass
 
 
 if __name__ == "__main__":

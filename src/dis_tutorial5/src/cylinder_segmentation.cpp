@@ -1,4 +1,6 @@
 #include <iostream>
+#include <limits>
+#include <pcl/console/print.h>
 #include <pcl/ModelCoefficients.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/filters/extract_indices.h>
@@ -39,7 +41,7 @@ bool verbose = false;
 // cloud filtering
 float x_limit_low = 0;
 float x_limit_high = 2.5;   // only look within 2.5m
-float z_limit_low = -0.5;
+float z_limit_low = -0.25;
 float z_limit_high = 0.5;
 
 // RANSAC
@@ -50,6 +52,9 @@ float ransac_distance_threshold = 0.01;
 float marker_height = 0.4;
 int max_detected_cylinders = 3;
 int min_cylinder_size = 500;
+float min_z_spread = 0.07f;   // reject flat objects (floor markings) — real cylinders span >7cm vertically
+float max_z_spread = 0.50f;   // reject tall objects (boxes, walls) — barrels are at most ~40cm tall
+float min_horizontal_axis_z = -0.30f; // reject horizontal detections whose axis center is at floor level (curbs etc.)
 
 void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     // save timestamp from message
@@ -214,8 +219,21 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
             break;
         }
 
+        // Reject flat objects: compute Z spread of inlier points in camera frame
+        float z_min = std::numeric_limits<float>::max();
+        float z_max = std::numeric_limits<float>::lowest();
+        for (const auto& pt : *cloud_cylinder) {
+            if (pt.z < z_min) z_min = pt.z;
+            if (pt.z > z_max) z_max = pt.z;
+        }
+        float z_spread = z_max - z_min;
+
+        // For horizontal detections, reject if axis center is at floor level (curbs, ledges)
+        float axis_center_z = coefficients_cylinder->values[2];
+        bool horizontal_height_ok = is_vertical || (axis_center_z >= min_horizontal_axis_z);
+
         // accept cylinders within margin
-        if ((std::abs(detected_radius - target_radius) <= error_margin) && (cylinder_points_count>=min_cylinder_size)) {
+        if ((std::abs(detected_radius - target_radius) <= error_margin) && (cylinder_points_count>=min_cylinder_size) && (z_spread >= min_z_spread) && (z_spread <= max_z_spread) && horizontal_height_ok) {
 
             if (verbose) {
                 std::cerr << "Cylinder radius: " << detected_radius << std::endl;
@@ -285,7 +303,9 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         remaining_normals.swap(temp_normals);
     }
 
-    std::cout << "Detected " << detected_cylinders << " cylinders." << std::endl;
+    if (detected_cylinders > 0) {
+        std::cout << "Detected " << detected_cylinders << " cylinders." << std::endl;
+    }
 
     // publish cylinder-filtered point cloud
     if (!all_cylinders->empty()) {
@@ -302,6 +322,8 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
+
+    pcl::console::setVerbosityLevel(pcl::console::L_ALWAYS);
 
     std::cout << "cylinder_segmentation started" << std::endl;
 
