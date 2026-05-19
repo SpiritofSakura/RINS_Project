@@ -191,7 +191,7 @@ class CylinderDebugView(Node):
         for o in fresh_circles:
             u, v = o["u"], o["v"]
             bgr = COLOUR_BGR.get(o["colour"], (200, 200, 200))
-            label = o["colour"][0].upper() + ("V" if o["orientation"] == "vertical" else "H⚠")
+            label = o["colour"][0].upper() + ("V" if o["orientation"] == "vertical" else "H!")
             if 0 <= u < w and 0 <= v < h:
                 cv2.circle(img, (u, v), 22, bgr, 3)
                 cv2.putText(img, label, (u + 26, v + 8),
@@ -212,7 +212,7 @@ class CylinderDebugView(Node):
                     continue
                 seen.add(key)
                 bgr = COLOUR_BGR.get(d["colour"], (200, 200, 200))
-                orient = "VERTICAL" if d["orientation"] == "vertical" else "HORIZONTAL ⚠"
+                orient = "VERTICAL" if d["orientation"] == "vertical" else "HORIZONTAL !"
                 text = f"{d['colour'].upper()} {orient}"
                 cv2.putText(img, text, (10, y_pos),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, bgr, 2, cv2.LINE_AA)

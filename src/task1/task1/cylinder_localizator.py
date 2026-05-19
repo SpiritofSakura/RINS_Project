@@ -21,8 +21,9 @@ from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-CLUSTER_RADIUS      = 0.6   # m — detections within this radius → same barrel
-CONFIRM_THRESH      = 15    # detections before confirming
+CLUSTER_RADIUS      = 0.6   # m — detections within this radius → same barrel (vertical)
+CLUSTER_RADIUS_H    = 1.2   # m — larger radius for horizontal cylinders (detections spread along axis)
+CONFIRM_THRESH      = 25    # detections before confirming
 MIN_MARK_DIST       = 0.5   # m — physical overlap guard (two barrels can't share a spot)
 SAME_BARREL_RADIUS  = 3.0   # m — suppress if same colour+orientation within this range
 MAX_RAW_PTS         = 300
@@ -150,13 +151,15 @@ class CylinderLocalizator(Node):
         colour = _rgb_to_colour_name(msg.color.r, msg.color.g, msg.color.b)
         orientation = msg.text if msg.text in ("vertical", "horizontal") else "vertical"
 
+        radius = CLUSTER_RADIUS_H if orientation == "horizontal" else CLUSTER_RADIUS
+
         best, best_d = None, float("inf")
         for c in self.clusters:
             d = c.dist2d(x, y)
             if d < best_d:
                 best, best_d = c, d
 
-        if best is None or best_d > CLUSTER_RADIUS:
+        if best is None or best_d > radius:
             best = Cluster(x, y, z, colour, orientation)
             self.clusters.append(best)
         else:
@@ -184,7 +187,6 @@ class CylinderLocalizator(Node):
                     f"Suppressed duplicate barrel ({colour}/{orientation}) at ({cx:.2f},{cy:.2f}) "
                     f"— matches confirmed barrel at dist={d:.2f} m"
                 )
-                cluster.confirmed = True
                 return
 
         cluster.confirmed = True
