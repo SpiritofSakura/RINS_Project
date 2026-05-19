@@ -39,12 +39,13 @@ SENSOR_QOS = QoSProfile(
 
 # ── Hough circle tuning ───────────────────────────────────────────────────────
 HOUGH_DP = 1                    # Inverse ratio of accumulator resolution
-HOUGH_MIN_DIST = 80             # Minimum distance between circle centres
+HOUGH_MIN_DIST = 80             # Minimum distance between circle centres (original resolution)
 HOUGH_PARAM1 = 48               # Upper threshold for Canny edge (balanced strictness)
 HOUGH_PARAM2 = 25               # Accumulator threshold (sim)
 HOUGH_PARAM2_REAL = 40          # Accumulator threshold (real robot)
-HOUGH_MIN_RADIUS = 1            # Minimum circle radius in pixels (lowered to detect black ring)
-HOUGH_MAX_RADIUS = 150          # Maximum circle radius (px)
+HOUGH_MIN_RADIUS = 1            # Minimum circle radius in pixels (original resolution)
+HOUGH_MAX_RADIUS = 100          # Maximum circle radius (px) — reduced from 150
+HOUGH_SCALE = 0.5               # Downscale factor for Hough input — cuts cost to ~25%
 
 # ── Cross-frame confirmation (handled by ring_localizator) ────────────────────
 MAX_MISSED    = 4               # frames without match before dropping candidate
@@ -190,8 +191,13 @@ class RingDetectorV2(Node):
         self._worker = threading.Thread(target=self._detection_worker, daemon=True)
         self._worker.start()
 
+        # Raw PointCloud2 message stored in the executor callback (O(1));
+        # deserialization happens in the worker thread to keep the executor free.
+        self._latest_pc_msg  = None
+        self._pc_dirty       = False
+
         # Timer to push debug images to OpenCV windows from the ROS executor thread
-        self.create_timer(0.05, self._display_timer_callback)
+        self.create_timer(0.1, self._display_timer_callback)
 
         self.get_logger().info("RingDetector V2 ready (Hough circle mode).")
 
@@ -213,37 +219,9 @@ class RingDetectorV2(Node):
             self.get_logger().error(f"depth_callback CvBridgeError: {e}", throttle_duration_sec=5.0)
 
     def pointcloud_callback(self, data):
-        """Store point cloud XYZ and RGB for accurate 3D position and color lookup."""
-        try:
-            # Log available fields once
-            if not hasattr(self, 'pc_fields_logged'):
-                field_names = [f.name for f in data.fields]
-                self.get_logger().debug(f"Point cloud fields: {field_names}")
-                self.pc_fields_logged = True
-
-            # Extract XYZ positions
-            pts_xyz = pc2.read_points_numpy(data, field_names=("x", "y", "z"))
-            if pts_xyz is None or len(pts_xyz) == 0:
-                self.get_logger().error(f"Point cloud XYZ empty or None")
-                return
-            self.pointcloud_xyz = pts_xyz.reshape((data.height, data.width, 3))
-            self.pointcloud_frame_id = data.header.frame_id.lstrip('/')
-
-            # Try to extract RGB field
-            for field_name in ["rgb", "rgba", "RGB"]:
-                try:
-                    pts_rgb = pc2.read_points_numpy(data, field_names=(field_name,))
-                    if pts_rgb is not None and len(pts_rgb) > 0:
-                        self.pointcloud_rgb = pts_rgb.reshape((data.height, data.width))
-                        return
-                except Exception:
-                    pass
-
-            # If no RGB field found, will use image patch color fallback
-            self.pointcloud_rgb = None
-
-        except Exception as e:
-            self.get_logger().error(f"✗ Point cloud failed: {e}")
+        """Store raw message only — deserialization is done in the worker thread."""
+        self._latest_pc_msg = data
+        self._pc_dirty = True
 
     def image_callback(self, data):
         """Snapshot the latest frame and wake the detection worker. Never blocks."""
@@ -282,6 +260,31 @@ class RingDetectorV2(Node):
                 self.get_logger().error(f"Detection worker error: {e}", throttle_duration_sec=5.0)
 
     def _process_frame(self):
+        # Deserialize the latest point cloud here (worker thread) so the executor
+        # callback stays O(1) and never blocks image/depth delivery.
+        if self._pc_dirty:
+            self._pc_dirty = False
+            pc_msg = self._latest_pc_msg
+            if pc_msg is not None:
+                try:
+                    if not hasattr(self, 'pc_fields_logged'):
+                        self.get_logger().debug(f"Point cloud fields: {[f.name for f in pc_msg.fields]}")
+                        self.pc_fields_logged = True
+                    pts_xyz = pc2.read_points_numpy(pc_msg, field_names=("x", "y", "z"))
+                    if pts_xyz is not None and len(pts_xyz) > 0:
+                        self.pointcloud_xyz = pts_xyz.reshape((pc_msg.height, pc_msg.width, 3))
+                        self.pointcloud_frame_id = pc_msg.header.frame_id.lstrip('/')
+                    for field_name in ["rgb", "rgba", "RGB"]:
+                        try:
+                            pts_rgb = pc2.read_points_numpy(pc_msg, field_names=(field_name,))
+                            if pts_rgb is not None and len(pts_rgb) > 0:
+                                self.pointcloud_rgb = pts_rgb.reshape((pc_msg.height, pc_msg.width))
+                                break
+                        except Exception:
+                            pass
+                except Exception as e:
+                    self.get_logger().debug(f"PC deserialize error: {e}")
+
         with self._frame_lock:
             cv_image = self._latest_rgb
         depth_snapshot = self.depth_raw  # atomic Python reference read (GIL-safe)
@@ -318,17 +321,27 @@ class RingDetectorV2(Node):
             colour_mask = None
             param2 = HOUGH_PARAM2
 
-        # Hough circle detection
-        circles = cv2.HoughCircles(
-            hough_input,
+        # Downscale for Hough — reduces cost to ~25% with negligible detection loss
+        sh, sw = hough_input.shape[:2]
+        hough_small = cv2.resize(hough_input,
+                                 (int(sw * HOUGH_SCALE), int(sh * HOUGH_SCALE)),
+                                 interpolation=cv2.INTER_AREA)
+        circles_small = cv2.HoughCircles(
+            hough_small,
             cv2.HOUGH_GRADIENT,
             dp=HOUGH_DP,
-            minDist=HOUGH_MIN_DIST,
+            minDist=int(HOUGH_MIN_DIST * HOUGH_SCALE),
             param1=HOUGH_PARAM1,
             param2=param2,
-            minRadius=HOUGH_MIN_RADIUS,
-            maxRadius=HOUGH_MAX_RADIUS,
+            minRadius=max(1, int(HOUGH_MIN_RADIUS * HOUGH_SCALE)),
+            maxRadius=int(HOUGH_MAX_RADIUS * HOUGH_SCALE),
         )
+
+        # Scale detected circles back to original resolution
+        if circles_small is not None:
+            circles = circles_small / HOUGH_SCALE
+        else:
+            circles = None
 
         frame_detections = []
         if circles is not None:

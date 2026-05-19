@@ -22,6 +22,7 @@ setup(
     extras_require={
         'test': ['pytest'],
     },
+    scripts=glob('scripts/*.py'),
     entry_points={
         'console_scripts': [
             'waypoint_navigator = task1.waypoint_navigator:main',
@@ -32,6 +33,7 @@ setup(
             'robot_state_overlay = task1.robot_state_overlay:main',
             'behavior_manager = task1.behavior_manager:main',
             'detect_rings_v2 = task1.detect_rings_v2:main',
+            'detect_rings_yolo = task1.detect_rings_yolo:main',
             'hsv_calibrator = task1.hsv_calibrator:main',
         ],
     },

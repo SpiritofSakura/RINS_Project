@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import threading
+import time
 from pathlib import Path
 
 import rclpy
@@ -124,6 +125,7 @@ class detect_faces(Node):
 		self.faces = []
 		self._face_candidates = []   # cross-frame accumulator
 		self._faces_lock = threading.Lock()
+		self._last_pc_time = 0.0
 
 		# Worker thread: face detection runs here, never in the ROS callback
 		self._latest_frame = None
@@ -422,6 +424,11 @@ class detect_faces(Node):
 		# Only publish markers when idle or on patrol - avoid interfering with other tasks
 		if self.robot_state not in ['IDLE', 'PATROL']:
 			return
+		# Rate-limit to 5 hz — face 3D position doesn't need full sensor rate
+		now = time.monotonic()
+		if now - self._last_pc_time < 0.2:
+			return
+		self._last_pc_time = now
 
 		# get point cloud attributes
 		height = data.height
