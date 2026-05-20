@@ -22,6 +22,13 @@ try:
 except ImportError:
     FACE_RECOGNITION_AVAILABLE = False
 
+try:
+    os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
+    from deepface import DeepFace
+    DEEPFACE_AVAILABLE = True
+except Exception:
+    DEEPFACE_AVAILABLE = False
+
 
 def parse_personnel_filename(filename):
     """Parse 'firstname_he_him_job_title.png' -> (name, pronouns, role)."""
@@ -59,6 +66,9 @@ class FaceRecognizer(Node):
         self.tolerance = tolerance
         self.bridge = CvBridge()
         self.latest_image = None
+        # Persistent overlay: list of {location, name, gender, role, stamp_ns}
+        self.face_overlays = []
+        self.overlay_fade_ns = int(3.0 * 1e9)
 
         self.known_encodings = []
         self.known_names = []
@@ -82,6 +92,7 @@ class FaceRecognizer(Node):
         )
 
         self.person_pub = self.create_publisher(String, '/recognized_person', 10)
+        self.debug_pub = self.create_publisher(Image, '/face_debug_image', 10)
 
         self.get_logger().info(
             f'Face recognizer ready. '
@@ -117,6 +128,30 @@ class FaceRecognizer(Node):
         try:
             self.latest_image = self.bridge.imgmsg_to_cv2(msg, 'rgb8')
         except CvBridgeError:
+            return
+
+        now_ns = self.get_clock().now().nanoseconds
+        fresh = [o for o in self.face_overlays
+                 if now_ns - o['stamp_ns'] < self.overlay_fade_ns]
+        self.face_overlays = fresh
+
+        draw_img = cv2.cvtColor(self.latest_image, cv2.COLOR_RGB2BGR)
+        for o in fresh:
+            top, right, bottom, left = o['location']
+            cv2.rectangle(draw_img, (left, top), (right, bottom), (0, 220, 0), 2)
+            label = f"{o['name']} ({o['gender']})"
+            cv2.putText(draw_img, label, (left, max(top - 8, 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+            if o['role']:
+                cv2.putText(draw_img, o['role'], (left, bottom + 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+
+        cv2.imshow('Face Recognition', draw_img)
+        cv2.waitKey(1)
+
+        try:
+            self.debug_pub.publish(self.bridge.cv2_to_imgmsg(draw_img, 'bgr8'))
+        except CvBridgeError:
             pass
 
     def _marker_callback(self, marker_msg):
@@ -151,10 +186,25 @@ class FaceRecognizer(Node):
             role = self.known_roles[best_idx]
             confidence = round(1.0 - best_dist, 3)
 
+            # Gender detection from face crop
+            gender = 'unknown'
+            if DEEPFACE_AVAILABLE:
+                try:
+                    top, right, bottom, left = location
+                    face_crop = img[top:bottom, left:right]
+                    result = DeepFace.analyze(
+                        face_crop, actions=['gender'],
+                        enforce_detection=False, silent=True
+                    )
+                    gender = result[0]['dominant_gender'].lower()  # 'man' or 'woman'
+                except Exception:
+                    pass
+
             payload = {
                 'name': name,
                 'pronouns': pronouns,
                 'role': role,
+                'gender': gender,
                 'confidence': confidence,
                 'map_x': marker_msg.pose.position.x,
                 'map_y': marker_msg.pose.position.y,
@@ -165,10 +215,19 @@ class FaceRecognizer(Node):
             self.person_pub.publish(msg_out)
 
             self.get_logger().info(
-                f'Recognized: {name} ({role}) '
+                f'Recognized: {name} ({role}, {gender}) '
                 f'confidence={confidence:.2f} '
                 f'at map ({marker_msg.pose.position.x:.2f}, {marker_msg.pose.position.y:.2f})'
             )
+
+            self.face_overlays.append({
+                'location': location,
+                'name': name,
+                'gender': gender,
+                'role': role,
+                'stamp_ns': self.get_clock().now().nanoseconds,
+            })
+            self.face_overlays = self.face_overlays[-10:]
 
 
 def main():
@@ -180,6 +239,8 @@ def main():
         node.destroy_node()
     except RuntimeError:
         pass
+    finally:
+        cv2.destroyAllWindows()
     rclpy.shutdown()
 
 

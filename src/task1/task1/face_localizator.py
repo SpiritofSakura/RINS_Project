@@ -6,7 +6,7 @@ import json
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import Marker
 from std_msgs.msg import String
 import tf2_ros
 
@@ -42,14 +42,8 @@ class FaceLocalizator(Node):
             10
         )
 
-        self.face_markers_pub = self.create_publisher(
-            MarkerArray,
-            '/detected_face_markers',
-            10
-        )
-
         self.all_detections = []
-        # Each entry: {'x': float, 'y': float, 'name': str, 'role': str, 'pronouns': str}
+        # Each entry: {'x': float, 'y': float, 'name': str, 'role': str, 'pronouns': str, 'gender': str}
         self.marked_locations = []
         self.marker_id_counter = 0
 
@@ -154,26 +148,26 @@ class FaceLocalizator(Node):
         name = recognition['name'] if recognition else 'Unknown'
         role = recognition['role'] if recognition else ''
         pronouns = recognition['pronouns'] if recognition else ''
+        gender = recognition['gender'] if recognition else ''
 
-        entry = {'x': x, 'y': y, 'name': name, 'role': role, 'pronouns': pronouns}
+        entry = {'x': x, 'y': y, 'name': name, 'role': role, 'pronouns': pronouns, 'gender': gender}
         self.marked_locations.append(entry)
-        self.publish_persistent_marker(x, y, name, role)
+        self.publish_persistent_marker(x, y, name, role, gender)
 
         self.get_logger().info(
-            f'Person confirmed: {name} ({role}) '
+            f'Person confirmed: {name} ({role}, {gender}) '
             f'at ({x:.2f}, {y:.2f}) — {detections_in_radius} detections'
         )
 
-    def publish_persistent_marker(self, x, y, name, role):
+    def publish_persistent_marker(self, x, y, name, role, gender=''):
         marker_id = self.marker_id_counter
         self.marker_id_counter += 1
 
-        # Sphere marker (position)
         sphere = Marker()
         sphere.header.frame_id = 'map'
         sphere.header.stamp = self.get_clock().now().to_msg()
         sphere.type = Marker.SPHERE
-        sphere.id = marker_id * 2
+        sphere.id = marker_id
         sphere.pose.position.x = x
         sphere.pose.position.y = y
         sphere.pose.position.z = 0.0
@@ -186,29 +180,7 @@ class FaceLocalizator(Node):
         sphere.color.b = 0.0
         sphere.color.a = 1.0
 
-        # Text marker (name + role)
-        text = Marker()
-        text.header.frame_id = 'map'
-        text.header.stamp = self.get_clock().now().to_msg()
-        text.type = Marker.TEXT_VIEW_FACING
-        text.id = marker_id * 2 + 1
-        text.pose.position.x = x
-        text.pose.position.y = y
-        text.pose.position.z = 0.5
-        text.pose.orientation.w = 1.0
-        text.scale.z = 0.25
-        text.color.r = 1.0
-        text.color.g = 1.0
-        text.color.b = 1.0
-        text.color.a = 1.0
-        label = name if not role else f'{name}\n{role}'
-        text.text = label
-
         self.face_locations_pub.publish(sphere)
-
-        arr = MarkerArray()
-        arr.markers = [sphere, text]
-        self.face_markers_pub.publish(arr)
 
 
 def main():
