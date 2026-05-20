@@ -32,7 +32,7 @@ MIN_MARK_DIST       = 0.5   # m — physical overlap guard (two barrels can't sh
 SAME_BARREL_RADIUS  = 3.0   # m — suppress if same colour+orientation within this range
 MAX_RAW_PTS         = 300
 
-REPORT_DIR = os.path.expanduser("~/RINS_report")
+REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "barrell_detection")
 REPORT_JSON = os.path.join(REPORT_DIR, "barrel_report.json")
 
 # Spill detection — HSV ranges (OpenCV: H 0-180, S/V 0-255)
