@@ -78,8 +78,8 @@ colcon build --packages-select task1 --merge-install
 - **Gender recognition** ✅  
   DeepFace (`dominant_gender`) runs on the face crop extracted from `face_recognition` bounding boxes. Result is visual only — not derived from pronouns/filename. Shown live in the "Face Recognition" debug window as `Name (man/woman)` with a green bounding box and role label below.
 
-- **Autonomous space exploration** ✅  
-  Waypoint patrol covers the map. Waypoints defined in `config/waypoints.yaml`. Robot resumes patrol from saved pose after each interaction.
+- **Autonomous space exploration** ⚠️  
+  Waypoint patrol covers the map. Waypoints defined in `config/waypoints.yaml`. Robot resumes patrol from saved pose after each interaction. **Missing:** advanced fine manoeuvring and intelligent exploration (dynamic replanning, frontier-based exploration, obstacle-aware fine positioning).
 
 - **Creating the inspection report** ✅  
   `cylinder_localizator` writes `barrell_detection/barrel_report.json` with barrel ID, colour, orientation, leak flag, map coordinates, and image path. A camera snapshot is saved for every confirmed barrel.
@@ -112,6 +112,12 @@ colcon build --packages-select task1 --merge-install
 
 - **Defect detection** ❌  
   Training code exists in `src/anomaly_detection/` (PatchCore / PaDiM / FastFlow via `anomalib`). Models have been trained offline on the RINS dataset. **Not integrated as a ROS2 node** — no live inference pipeline. Would need a node that subscribes to camera images, runs inference, and publishes results.
+
+- **Advanced fine manoeuvring and mobile manipulation** ❌  
+  No fine positioning control. The arm moves to fixed poses (look-down for spill check) but has no closed-loop manipulation. Robot navigation stops at Nav2 goal poses without precision alignment to targets.
+
+- **Intelligent navigation and exploration** ❌  
+  No frontier-based or coverage-based exploration. Patrol follows a fixed waypoint list — no dynamic replanning based on what has or hasn't been seen.
 
 - **Dialogue with ASR** ❌  
   No microphone input or speech recognition. `espeak` is one-way only.
