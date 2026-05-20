@@ -55,6 +55,8 @@ int min_cylinder_size = 500;
 float min_z_spread = 0.07f;   // reject flat objects (floor markings) — real cylinders span >7cm vertically
 float max_z_spread = 0.50f;   // reject tall objects (boxes, walls) — barrels are at most ~40cm tall
 float min_horizontal_axis_z = -0.30f; // reject horizontal detections whose axis center is at floor level (curbs etc.)
+float min_saturation = 0.30f; // HSV saturation threshold — rejects grey/beige boxes; black barrels pass via value check
+float max_value_for_black = 0.25f; // brightness ceiling — allows black barrels to bypass saturation check
 
 void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     // save timestamp from message
@@ -265,9 +267,40 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
                 sum_g += static_cast<float>(pt.g);
                 sum_b += static_cast<float>(pt.b);
             }
-            marker.color.r = sum_r / cylinder_points_count / 255.0f;
-            marker.color.g = sum_g / cylinder_points_count / 255.0f;
-            marker.color.b = sum_b / cylinder_points_count / 255.0f;
+            float avg_r = sum_r / cylinder_points_count / 255.0f;
+            float avg_g = sum_g / cylinder_points_count / 255.0f;
+            float avg_b = sum_b / cylinder_points_count / 255.0f;
+
+            // Reject colourless objects (grey/beige boxes) via HSV saturation.
+            // Black barrels are exempt: they have low value (brightness) instead of high saturation.
+            float max_c = std::max({avg_r, avg_g, avg_b});
+            float min_c = std::min({avg_r, avg_g, avg_b});
+            float saturation = (max_c > 0.0f) ? (max_c - min_c) / max_c : 0.0f;
+            float value = max_c;
+            bool colour_ok = (saturation >= min_saturation) || (value <= max_value_for_black);
+            if (!colour_ok) {
+                if (verbose) {
+                    std::cerr << "Rejected: low saturation=" << saturation
+                              << " value=" << value << std::endl;
+                }
+                // still remove from remaining cloud so we don't loop on the same object
+                extract.setNegative(true);
+                pcl::PointCloud<PointT>::Ptr tmp(new pcl::PointCloud<PointT>());
+                extract.filter(*tmp);
+                pcl::ExtractIndices<pcl::Normal> exn;
+                exn.setInputCloud(remaining_normals);
+                exn.setIndices(inliers_cylinder);
+                exn.setNegative(true);
+                pcl::PointCloud<pcl::Normal>::Ptr tmpn(new pcl::PointCloud<pcl::Normal>());
+                exn.filter(*tmpn);
+                remaining_cloud.swap(tmp);
+                remaining_normals.swap(tmpn);
+                continue;
+            }
+
+            marker.color.r = avg_r;
+            marker.color.g = avg_g;
+            marker.color.b = avg_b;
             marker.color.a = 1.0f;
 
             // Encode orientation in marker.text — read by cylinder_localizator

@@ -6,6 +6,7 @@ logs a JSON report, saves a camera image for horizontal (leaking) barrels, and
 prints a terminal warning.
 """
 
+import colorsys
 import json
 import math
 import os
@@ -21,7 +22,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Empty
 from visualization_msgs.msg import Marker
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
@@ -65,12 +66,24 @@ MARKER_COLOURS = {
 
 
 def _rgb_to_colour_name(r, g, b):
-    best, best_dist = "unknown", float("inf")
-    for name, (cr, cg, cb) in MARKER_COLOURS.items():
-        d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
-        if d < best_dist:
-            best, best_dist = name, d
-    return best
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    h_deg = h * 360.0
+
+    if v < 0.15:
+        return "black"
+    if s < 0.25:
+        return "unknown"
+    if h_deg < 15 or h_deg >= 330:
+        return "red"
+    if h_deg < 40:
+        return "orange"
+    if h_deg < 80:
+        return "yellow"
+    if h_deg < 165:
+        return "green"
+    if h_deg < 270:
+        return "blue"
+    return "unknown"
 
 
 class Cluster:
@@ -137,6 +150,9 @@ class CylinderLocalizator(Node):
             Marker, "/detected_cylinder_locations", 10
         )
         self.arm_command_pub = self.create_publisher(String, "/arm_command", 1)
+        self.spill_done_pub = self.create_publisher(Empty, "/spill_check_done", 1)
+
+        self.create_subscription(Empty, "/start_spill_check", self._start_spill_cb, 10)
 
         self.clusters: list[Cluster] = []
         self.marker_id_counter = 0
@@ -146,6 +162,7 @@ class CylinderLocalizator(Node):
         self._spill_state = "idle"           # idle → moving → capturing → returning
         self._spill_wait = 0
         self._current_spill: tuple | None = None
+        self._spill_check_triggered = False  # set by /start_spill_check from behavior_manager
         self.create_timer(1.0, self._spill_timer_cb)
 
         self.get_logger().info(
@@ -252,6 +269,15 @@ class CylinderLocalizator(Node):
         self._publish_marker(barrel_id, cx, cy, cz, colour, orientation)
 
     # ── Spill detection ───────────────────────────────────────────────────────
+    def _start_spill_cb(self, _msg: Empty):
+        """Called by behavior_manager when the robot has arrived at a horizontal barrel."""
+        if not self._spill_queue:
+            self.get_logger().warn("Spill check triggered but queue is empty — signalling done immediately.")
+            self.spill_done_pub.publish(Empty())
+            return
+        self._spill_check_triggered = True
+        self.get_logger().info("Spill check triggered by behavior_manager.")
+
     def _publish_arm(self, cmd: str):
         msg = String()
         msg.data = cmd
@@ -259,7 +285,8 @@ class CylinderLocalizator(Node):
 
     def _spill_timer_cb(self):
         if self._spill_state == "idle":
-            if self._spill_queue:
+            if self._spill_queue and self._spill_check_triggered:
+                self._spill_check_triggered = False
                 self._current_spill = self._spill_queue.pop(0)
                 barrel_id, colour = self._current_spill
                 self.get_logger().info(
@@ -281,6 +308,8 @@ class CylinderLocalizator(Node):
             self._spill_wait += 1
             if self._spill_wait >= ARM_MOVE_WAIT_SECS:
                 self._spill_state = "idle"
+                self.spill_done_pub.publish(Empty())
+                self.get_logger().info("Spill check complete — signalling behavior_manager.")
 
     def _check_spill(self):
         barrel_id, colour = self._current_spill
@@ -392,6 +421,7 @@ class CylinderLocalizator(Node):
 
         marker.color.r, marker.color.g, marker.color.b = r, g, b
         marker.color.a = 1.0
+        marker.text = orientation  # read by behavior_manager to detect horizontal barrels
 
         self.cylinder_locations_pub.publish(marker)
 

@@ -1,0 +1,16 @@
+{
+  "barrels": [
+    {
+      "id": 1,
+      "colour": "green",
+      "orientation": "vertical",
+      "leak_detected": false,
+      "position_map": [
+        1.61,
+        -4.613
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_1_100756.jpg",
+      "confirmed_at": "2026-05-20 10:07:56"
+    }
+  ]
+}

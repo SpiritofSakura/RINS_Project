@@ -56,6 +56,10 @@ class BehaviorManager(Node):
         self.interaction_end_time = None
         self.interaction_duration = 2.5
 
+        self.waiting_for_spill_check = False
+        self.spill_check_start_time = None
+        self.spill_check_timeout = 60.0  # seconds before giving up waiting
+
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
         self.approach_timeout = 15.0  # seconds
@@ -152,6 +156,11 @@ class BehaviorManager(Node):
             '/resume_patrol',
             self.resume_patrol_callback,
             10
+        )
+
+        self.start_spill_pub = self.create_publisher(Empty, '/start_spill_check', 1)
+        self.spill_done_subscriber = self.create_subscription(
+            Empty, '/spill_check_done', self._spill_done_cb, 10
         )
 
         self.amcl_pose_subscriber = self.create_subscription(
@@ -262,7 +271,14 @@ class BehaviorManager(Node):
     def finish_interaction(self):
         self.interaction_active = False
         self.interaction_end_time = None
+        self.waiting_for_spill_check = False
+        self.spill_check_start_time = None
         self.target_done_callback(Empty())
+
+    def _spill_done_cb(self, _msg: Empty):
+        if self.waiting_for_spill_check:
+            self.get_logger().info('Spill check done — finishing cylinder interaction.')
+            self.finish_interaction()
 
     def main_loop(self):
         # Process any pending detections that were queued before AMCL was ready
@@ -305,6 +321,15 @@ class BehaviorManager(Node):
                 self.finish_interaction()
             return
 
+        # While waiting for the spill check to finish, hold here and check for timeout
+        if self.waiting_for_spill_check:
+            if self.spill_check_start_time is not None:
+                elapsed = (self.get_clock().now().nanoseconds - self.spill_check_start_time) / 1e9
+                if elapsed >= self.spill_check_timeout:
+                    self.get_logger().warn('Spill check timed out — finishing interaction anyway.')
+                    self.finish_interaction()
+            return
+
         # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
         # This is a FAILSAFE that cancels the stuck nav goal and forces interaction to start
         if self.approach_start_time is not None and self.active_target is not None:
@@ -323,7 +348,13 @@ class BehaviorManager(Node):
                         self.publish_state('INTERACT_CYLINDER')
                     else:  # APPROACH_RING
                         self.publish_state('INTERACT_RING')
-                    self.start_interaction()
+                    if self.current_state == 'INTERACT_CYLINDER' and self.active_target is not None and self.active_target.get('is_horizontal', False):
+                        self.get_logger().info('Horizontal barrel (timeout path) — waiting for spill check.')
+                        self.waiting_for_spill_check = True
+                        self.spill_check_start_time = self.get_clock().now().nanoseconds
+                        self.start_spill_pub.publish(Empty())
+                    else:
+                        self.start_interaction()
                     # Do NOT return - let normal interaction logic proceed
 
         if self.result_future is None:
@@ -361,7 +392,13 @@ class BehaviorManager(Node):
             elif nav_goal_type == 'approach_cylinder':
                 self.publish_state('INTERACT_CYLINDER')
                 self.get_logger().info('Reached cylinder target. Starting interaction.')
-                self.start_interaction()
+                if self.active_target is not None and self.active_target.get('is_horizontal', False):
+                    self.get_logger().info('Horizontal barrel — waiting for spill check.')
+                    self.waiting_for_spill_check = True
+                    self.spill_check_start_time = self.get_clock().now().nanoseconds
+                    self.start_spill_pub.publish(Empty())
+                else:
+                    self.start_interaction()
 
             elif nav_goal_type == 'return_to_patrol':
                 self.get_logger().info('Returned to saved patrol pose.')
@@ -653,11 +690,12 @@ class BehaviorManager(Node):
             return
 
         color = self.marker_to_ring_color(msg)
+        is_horizontal = (msg.text == 'horizontal')
 
         if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'cylinder' for t in self.pending_targets):
             return
 
-        self.pending_targets.append({'type': 'cylinder', 'x': x, 'y': y, 'z': z, 'color': color})
+        self.pending_targets.append({'type': 'cylinder', 'x': x, 'y': y, 'z': z, 'color': color, 'is_horizontal': is_horizontal})
 
     def target_done_callback(self, msg: Empty):
         if self.active_target is None:

@@ -8,6 +8,8 @@ Two-layer display:
      If TF fails, layer 1 is still shown (so you always see detections).
 """
 
+import colorsys
+
 import rclpy
 import rclpy.duration
 import rclpy.time
@@ -46,15 +48,28 @@ COLOUR_BGR = {
 }
 
 FADE_SECS = 0.8
+LEAK_BANNER_SECS = 5.0  # how long the leak warning stays on the top camera
 
 
 def _rgb_to_name(r, g, b):
-    best, best_d = "unknown", float("inf")
-    for name, (cr, cg, cb) in MARKER_COLOURS.items():
-        d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
-        if d < best_d:
-            best, best_d = name, d
-    return best
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    h_deg = h * 360.0
+
+    if v < 0.15:
+        return "black"
+    if s < 0.25:
+        return "unknown"
+    if h_deg < 15 or h_deg >= 330:
+        return "red"
+    if h_deg < 40:
+        return "orange"
+    if h_deg < 80:
+        return "yellow"
+    if h_deg < 165:
+        return "green"
+    if h_deg < 270:
+        return "blue"
+    return "unknown"
 
 
 class CylinderDebugView(Node):
@@ -63,8 +78,13 @@ class CylinderDebugView(Node):
 
         self.bridge = CvBridge()
         self.latest_image = None
+        self.top_camera_image = None
         self.K = None
         self.camera_frame = None
+
+        # Timestamp of last horizontal (leak suspect) marker — drives top-cam banner
+        self.last_leak_t = None
+        self.last_leak_colour = None
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -77,6 +97,9 @@ class CylinderDebugView(Node):
         self.create_subscription(
             Image, "/oakd/rgb/preview/image_raw", self._image_cb, SENSOR_QOS
         )
+        self.create_subscription(
+            Image, "/top_camera/rgb/preview/image_raw", self._top_image_cb, SENSOR_QOS
+        )
         # Use default (reliable) QoS for camera_info — it's latched/reliable
         self.create_subscription(
             CameraInfo, "/oakd/rgb/preview/camera_info",
@@ -87,15 +110,23 @@ class CylinderDebugView(Node):
         )
 
         self.debug_pub = self.create_publisher(Image, "/cylinder_debug_image", 10)
+        self.top_debug_pub = self.create_publisher(Image, "/cylinder_top_debug_image", 10)
         self.get_logger().info("CylinderDebugView ready")
 
-    # ── Camera image ──────────────────────────────────────────────────────────
+    # ── Camera images ─────────────────────────────────────────────────────────
     def _image_cb(self, msg: Image):
         try:
             self.latest_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except CvBridgeError:
             pass
         self._render()
+
+    def _top_image_cb(self, msg: Image):
+        try:
+            self.top_camera_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except CvBridgeError:
+            pass
+        self._render_top()
 
     # ── Camera intrinsics ─────────────────────────────────────────────────────
     def _info_cb(self, msg: CameraInfo):
@@ -115,6 +146,10 @@ class CylinderDebugView(Node):
         now = self.get_clock().now()
 
         self.get_logger().info(f"Cylinder detected: {colour}")
+
+        if orientation == "horizontal":
+            self.last_leak_t = now
+            self.last_leak_colour = colour
 
         # Layer 1: always record (text banner, no TF needed)
         self.text_detections.append({
@@ -210,11 +245,54 @@ class CylinderDebugView(Node):
                 y_pos += 26
 
 
-        cv2.imshow("Cylinder Debug", img)
+        cv2.imshow("Cylinder Debug (bottom camera)", img)
         cv2.waitKey(1)
 
         try:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(img, "bgr8"))
+        except CvBridgeError:
+            pass
+
+    # ── Top camera render ─────────────────────────────────────────────────────
+    def _render_top(self):
+        if self.top_camera_image is None:
+            return
+
+        img = self.top_camera_image.copy()
+        now = self.get_clock().now()
+
+        leak_age_ns = (
+            (now - self.last_leak_t).nanoseconds
+            if self.last_leak_t is not None else float("inf")
+        )
+        leak_active = leak_age_ns < int(LEAK_BANNER_SECS * 1e9)
+
+        if leak_active:
+            colour = self.last_leak_colour or "unknown"
+            bgr = COLOUR_BGR.get(colour, (0, 200, 255))
+
+            # Flashing red border
+            age_frac = leak_age_ns / (LEAK_BANNER_SECS * 1e9)
+            if int(age_frac * 6) % 2 == 0:
+                h, w = img.shape[:2]
+                cv2.rectangle(img, (0, 0), (w - 1, h - 1), (0, 0, 220), 6)
+
+            # Big warning banner
+            cv2.rectangle(img, (0, 0), (img.shape[1], 60), (0, 0, 0), -1)
+            cv2.putText(img, f"!! LEAK CHECK: {colour.upper()} BARREL !!",
+                        (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                        (0, 80, 255), 3, cv2.LINE_AA)
+        else:
+            # Subtle "waiting" label when idle
+            cv2.putText(img, "top camera — spill detection",
+                        (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (160, 160, 160), 1, cv2.LINE_AA)
+
+        cv2.imshow("Top Camera (spill detection)", img)
+        cv2.waitKey(1)
+
+        try:
+            self.top_debug_pub.publish(self.bridge.cv2_to_imgmsg(img, "bgr8"))
         except CvBridgeError:
             pass
 
