@@ -106,14 +106,14 @@ class BehaviorManager(Node):
             Bool,
             '/manual_control_active',
             self.manual_control_callback,
-            qos_latched
+            10
         )
 
         self.patrol_command_subscriber = self.create_subscription(
             Bool,
             '/patrol_command',
             self.patrol_command_callback,
-            qos_latched
+            10
         )
 
         self.patrol_finished_subscriber = self.create_subscription(
