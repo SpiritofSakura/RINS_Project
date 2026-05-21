@@ -56,6 +56,10 @@ class BehaviorManager(Node):
         self.interaction_end_time = None
         self.interaction_duration = 2.5
 
+        self.waiting_for_spill_check = False
+        self.spill_check_start_time = None
+        self.spill_check_timeout = 60.0  # seconds before giving up waiting
+
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
         self.approach_timeout = 15.0  # seconds
@@ -78,6 +82,15 @@ class BehaviorManager(Node):
             "I found a {color} ring. Fashion approved.",
             "A {color} ring. Quite the dramatic choice.",
             "This appears to be a {color} ring. Impressive.",
+        ]
+
+        self.cylinder_lines = [
+            "I found a {color} cylinder. How cylindrical.",
+            "Behold. A {color} cylinder.",
+            "This cylinder is {color}. Notable.",
+            "A {color} cylinder has been detected.",
+            "I found a {color} cylinder. Very geometric.",
+            "A {color} cylinder. Structurally sound.",
         ]
 
         qos_latched = QoSProfile(
@@ -124,6 +137,13 @@ class BehaviorManager(Node):
             10
         )
 
+        self.cylinder_subscriber = self.create_subscription(
+            Marker,
+            '/detected_cylinder_locations',
+            self.cylinder_callback,
+            10
+        )
+
         self.target_done_subscriber = self.create_subscription(
             Empty,
             '/target_done',
@@ -136,6 +156,11 @@ class BehaviorManager(Node):
             '/resume_patrol',
             self.resume_patrol_callback,
             10
+        )
+
+        self.start_spill_pub = self.create_publisher(Empty, '/start_spill_check', 1)
+        self.spill_done_subscriber = self.create_subscription(
+            Empty, '/spill_check_done', self._spill_done_cb, 10
         )
 
         self.amcl_pose_subscriber = self.create_subscription(
@@ -235,6 +260,10 @@ class BehaviorManager(Node):
         template = random.choice(self.ring_lines)
         return template.format(color=color)
 
+    def random_cylinder_line(self, color):
+        template = random.choice(self.cylinder_lines)
+        return template.format(color=color)
+
     def start_interaction(self):
         self.interaction_active = True
         self.interaction_end_time = self.get_clock().now().nanoseconds + int(self.interaction_duration * 1e9)
@@ -242,7 +271,14 @@ class BehaviorManager(Node):
     def finish_interaction(self):
         self.interaction_active = False
         self.interaction_end_time = None
+        self.waiting_for_spill_check = False
+        self.spill_check_start_time = None
         self.target_done_callback(Empty())
+
+    def _spill_done_cb(self, _msg: Empty):
+        if self.waiting_for_spill_check:
+            self.get_logger().info('Spill check done — finishing cylinder interaction.')
+            self.finish_interaction()
 
     def main_loop(self):
         # Process any pending detections that were queued before AMCL was ready
@@ -276,13 +312,28 @@ class BehaviorManager(Node):
                     else:
                         self.speak_text('I found a ring. Quite mysterious.')
 
+                elif self.current_state == 'INTERACT_CYLINDER':
+                    if self.active_target is not None and 'color' in self.active_target:
+                        self.speak_text(self.random_cylinder_line(self.active_target['color']))
+                    else:
+                        self.speak_text('I found a cylinder. Remarkable.')
+
                 self.finish_interaction()
+            return
+
+        # While waiting for the spill check to finish, hold here and check for timeout
+        if self.waiting_for_spill_check:
+            if self.spill_check_start_time is not None:
+                elapsed = (self.get_clock().now().nanoseconds - self.spill_check_start_time) / 1e9
+                if elapsed >= self.spill_check_timeout:
+                    self.get_logger().warn('Spill check timed out — finishing interaction anyway.')
+                    self.finish_interaction()
             return
 
         # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
         # This is a FAILSAFE that cancels the stuck nav goal and forces interaction to start
         if self.approach_start_time is not None and self.active_target is not None:
-            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING') and self.nav_goal_type in ('approach_face', 'approach_ring'):
+            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING', 'APPROACH_CYLINDER') and self.nav_goal_type in ('approach_face', 'approach_ring', 'approach_cylinder'):
                 elapsed = (self.get_clock().now().nanoseconds - self.approach_start_time) / 1e9
                 if elapsed >= self.approach_timeout:
                     self.get_logger().warn(
@@ -293,9 +344,17 @@ class BehaviorManager(Node):
                     # Gracefully transition to interact - use same interaction flow as normal
                     if self.current_state == 'APPROACH_FACE':
                         self.publish_state('INTERACT_FACE')
+                    elif self.current_state == 'APPROACH_CYLINDER':
+                        self.publish_state('INTERACT_CYLINDER')
                     else:  # APPROACH_RING
                         self.publish_state('INTERACT_RING')
-                    self.start_interaction()
+                    if self.current_state == 'INTERACT_CYLINDER' and self.active_target is not None and self.active_target.get('is_horizontal', False):
+                        self.get_logger().info('Horizontal barrel (timeout path) — waiting for spill check.')
+                        self.waiting_for_spill_check = True
+                        self.spill_check_start_time = self.get_clock().now().nanoseconds
+                        self.start_spill_pub.publish(Empty())
+                    else:
+                        self.start_interaction()
                     # Do NOT return - let normal interaction logic proceed
 
         if self.result_future is None:
@@ -329,6 +388,17 @@ class BehaviorManager(Node):
                 self.publish_state('INTERACT_RING')
                 self.get_logger().info('Reached ring target. Starting interaction.')
                 self.start_interaction()
+
+            elif nav_goal_type == 'approach_cylinder':
+                self.publish_state('INTERACT_CYLINDER')
+                self.get_logger().info('Reached cylinder target. Starting interaction.')
+                if self.active_target is not None and self.active_target.get('is_horizontal', False):
+                    self.get_logger().info('Horizontal barrel — waiting for spill check.')
+                    self.waiting_for_spill_check = True
+                    self.spill_check_start_time = self.get_clock().now().nanoseconds
+                    self.start_spill_pub.publish(Empty())
+                else:
+                    self.start_interaction()
 
             elif nav_goal_type == 'return_to_patrol':
                 self.get_logger().info('Returned to saved patrol pose.')
@@ -484,6 +554,14 @@ class BehaviorManager(Node):
                     self.publish_state('APPROACH_RING', force_publish)
                 return
 
+            if self.nav_goal_type == 'approach_cylinder' or self.current_state == 'INTERACT_CYLINDER':
+                self.publish_patrol_enabled(False)
+                if self.current_state == 'INTERACT_CYLINDER':
+                    self.publish_state('INTERACT_CYLINDER', force_publish)
+                else:
+                    self.publish_state('APPROACH_CYLINDER', force_publish)
+                return
+
             if self.active_target['type'] == 'face':
                 self.publish_patrol_enabled(False)
                 self.publish_state('APPROACH_FACE', force_publish)
@@ -492,6 +570,11 @@ class BehaviorManager(Node):
             if self.active_target['type'] == 'ring':
                 self.publish_patrol_enabled(False)
                 self.publish_state('APPROACH_RING', force_publish)
+                return
+
+            if self.active_target['type'] == 'cylinder':
+                self.publish_patrol_enabled(False)
+                self.publish_state('APPROACH_CYLINDER', force_publish)
                 return
 
         if self.patrol_requested and not self.patrol_finished:
@@ -535,7 +618,7 @@ class BehaviorManager(Node):
         self.publish_patrol_enabled(False)
 
         goal_x, goal_y, goal_yaw = approach
-        nav_goal_type = 'approach_face' if target_type == 'face' else 'approach_ring'
+        nav_goal_type = {'face': 'approach_face', 'ring': 'approach_ring', 'cylinder': 'approach_cylinder'}.get(target_type, 'approach_ring')
 
         if not self.send_nav_goal(goal_x, goal_y, goal_yaw, nav_goal_type):
             self.active_target = None
@@ -592,12 +675,34 @@ class BehaviorManager(Node):
         # Queue the detection; it will be processed in main_loop when AMCL is ready
         self.pending_targets.append({'type': 'ring', 'x': x, 'y': y, 'z': z, 'color': color})
 
+    def cylinder_callback(self, msg: Marker):
+        if self.current_state not in ('PATROL', 'IDLE'):
+            return
+
+        if self.active_target is not None:
+            return
+
+        x = msg.pose.position.x
+        y = msg.pose.position.y
+        z = msg.pose.position.z
+
+        if self.is_already_handled('cylinder', x, y):
+            return
+
+        color = self.marker_to_ring_color(msg)
+        is_horizontal = (msg.text == 'horizontal')
+
+        if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'cylinder' for t in self.pending_targets):
+            return
+
+        self.pending_targets.append({'type': 'cylinder', 'x': x, 'y': y, 'z': z, 'color': color, 'is_horizontal': is_horizontal})
+
     def target_done_callback(self, msg: Empty):
         if self.active_target is None:
             self.get_logger().info('No active target to mark as done.')
             return
 
-        if self.current_state not in ('INTERACT_FACE', 'INTERACT_RING', 'APPROACH_FACE', 'APPROACH_RING'):
+        if self.current_state not in ('INTERACT_FACE', 'INTERACT_RING', 'INTERACT_CYLINDER', 'APPROACH_FACE', 'APPROACH_RING', 'APPROACH_CYLINDER'):
             self.get_logger().info('Target done received, but current state is not target handling.')
             return
 

@@ -57,4 +57,11 @@ build/
 terminal.sh
 .venv/
 src/rviz_2d_overlay_plugins/
-src/anomaly_detection/
+
+# =========================
+# Anomaly detection
+# =========================
+src/anomaly_detection/data/
+src/anomaly_detection/.venv/
+src/anomaly_detection/results/
+src/anomaly_detection/eval_output/

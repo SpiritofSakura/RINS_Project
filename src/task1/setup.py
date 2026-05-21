@@ -11,6 +11,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
+        ('share/' + package_name + '/config/personnel', glob('config/personnel/*.png')),
         ('share/' + package_name + '/launch', glob('launch/*.py')),
     ],
     install_requires=['setuptools'],
@@ -32,6 +33,9 @@ setup(
             'robot_state_overlay = task1.robot_state_overlay:main',
             'behavior_manager = task1.behavior_manager:main',
             'detect_rings_v2 = task1.detect_rings_v2:main',
+            'face_recognizer = task1.face_recognizer:main',
+            'cylinder_localizator = task1.cylinder_localizator:main',
+            'cylinder_debug_view = task1.cylinder_debug_view:main',
         ],
     },
 )
