@@ -158,8 +158,7 @@ class WaypointNavigator(Node):
 
     def start_recovery(self):
         if self.current_pose is None:
-            self.get_logger().warn('No AMCL pose yet — skipping waypoint instead of recovery.')
-            self.indeks_tocke += 1
+            self.get_logger().warn('No AMCL pose yet — will retry waypoint once pose arrives.')
             return
 
         yaw = yaw_from_quaternion(self.current_pose.orientation)
@@ -203,10 +202,9 @@ class WaypointNavigator(Node):
             return
 
         if not rocaj_cilja.accepted:
-            self.get_logger().warn('Recovery goal rejected — skipping waypoint.')
+            self.get_logger().warn('Recovery goal rejected — retrying waypoint.')
             self.recovery_active = False
             self.recovery_sent_time = None
-            self.indeks_tocke += 1
             return
 
         self.get_logger().info('Recovery goal accepted.')
@@ -268,7 +266,7 @@ class WaypointNavigator(Node):
             elapsed_rec = (self.get_clock().now() - self.recovery_sent_time).nanoseconds / 1e9
             if elapsed_rec > self.recovery_timeout:
                 self.get_logger().warn(
-                    f'Recovery stuck for {elapsed_rec:.1f}s — force-skipping waypoint {self.indeks_tocke + 1}.'
+                    f'Recovery stuck for {elapsed_rec:.1f}s — resetting and retrying waypoint {self.indeks_tocke + 1}.'
                 )
                 self.recovery_active = False
                 self.recovery_sent_time = None
@@ -277,7 +275,6 @@ class WaypointNavigator(Node):
                 self.rocaj_cilja = None
                 self.rezultat_prihodnost = None
                 self.goal_sent_time = None
-                self.indeks_tocke += 1
                 return
 
         if not self.cakanje_na_sprejem and not self.cilj_aktiven and self.rezultat_prihodnost is None:
@@ -305,8 +302,7 @@ class WaypointNavigator(Node):
             if status == GoalStatus.STATUS_SUCCEEDED:
                 self.get_logger().info('Recovery succeeded — retrying waypoint.')
             else:
-                self.get_logger().warn(f'Recovery failed (status {status}) — skipping waypoint.')
-                self.indeks_tocke += 1
+                self.get_logger().warn(f'Recovery failed (status {status}) — retrying waypoint.')
             return
 
         if status == GoalStatus.STATUS_SUCCEEDED:
@@ -339,10 +335,9 @@ class WaypointNavigator(Node):
 
         if self.consecutive_rejects >= self.max_rejects:
             self.get_logger().warn(
-                f'Waypoint {self.indeks_tocke + 1} rejected {self.consecutive_rejects} times — skipping.'
+                f'Waypoint {self.indeks_tocke + 1} rejected {self.consecutive_rejects} times — retrying.'
             )
             self.consecutive_rejects = 0
-            self.indeks_tocke += 1
             return
 
         tocka = self.seznam_tock[self.indeks_tocke]

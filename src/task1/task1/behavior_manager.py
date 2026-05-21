@@ -92,6 +92,7 @@ class BehaviorManager(Node):
         self.patrol_enabled_publisher = self.create_publisher(Bool, '/patrol_enabled', qos_latched)
         self.speak_publisher = self.create_publisher(String, '/speak', 10)
         self.handled_face_publisher = self.create_publisher(Point, '/handled_face_location', 10)
+        self.handled_ring_publisher = self.create_publisher(Point, '/handled_ring_location', 10)
 
         self.manual_control_subscriber = self.create_subscription(
             Bool,
@@ -566,12 +567,6 @@ class BehaviorManager(Node):
         self.refresh_state()
 
     def face_callback(self, msg: Marker):
-        if self.current_state not in ('PATROL', 'IDLE'):
-            return
-
-        if self.active_target is not None:
-            return
-
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
@@ -579,20 +574,19 @@ class BehaviorManager(Node):
         if self.is_already_handled('face', x, y):
             return
 
-        # Check if already in queue at same position (deduplication)
+        # Skip if this is the currently active target
+        if self.active_target is not None and self.active_target['type'] == 'face':
+            if self.distance(x, y, self.active_target['x'], self.active_target['y']) < self.target_match_threshold:
+                return
+
+        # Deduplicate queue
         if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'face' for t in self.pending_targets):
             return
 
-        # Queue the detection; it will be processed in main_loop when AMCL is ready
+        # Queue — processed in main_loop when robot is free
         self.pending_targets.append({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None})
 
     def ring_callback(self, msg: Marker):
-        if self.current_state not in ('PATROL', 'IDLE'):
-            return
-
-        if self.active_target is not None:
-            return
-
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
@@ -601,12 +595,17 @@ class BehaviorManager(Node):
             return
 
         color = self.marker_to_ring_color(msg)
-        
-        # Check if already in queue at same position (deduplication)
+
+        # Skip if this is the currently active target
+        if self.active_target is not None and self.active_target['type'] == 'ring':
+            if self.distance(x, y, self.active_target['x'], self.active_target['y']) < self.target_match_threshold:
+                return
+
+        # Deduplicate queue
         if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'ring' for t in self.pending_targets):
             return
-        
-        # Queue the detection; it will be processed in main_loop when AMCL is ready
+
+        # Queue — processed in main_loop when robot is free
         self.pending_targets.append({'type': 'ring', 'x': x, 'y': y, 'z': z, 'color': color})
 
     def target_done_callback(self, msg: Empty):
@@ -631,6 +630,13 @@ class BehaviorManager(Node):
             pt.y = float(self.active_target['y'])
             pt.z = float(self.active_target['z'])
             self.handled_face_publisher.publish(pt)
+
+        if self.active_target['type'] == 'ring':
+            pt = Point()
+            pt.x = float(self.active_target['x'])
+            pt.y = float(self.active_target['y'])
+            pt.z = float(self.active_target['z'])
+            self.handled_ring_publisher.publish(pt)
 
         if self.saved_patrol_pose is None:
             self.get_logger().warn('No saved patrol pose. Clearing target without return.')

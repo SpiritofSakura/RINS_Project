@@ -82,12 +82,12 @@ class RingDetectorYOLO(Node):
                 ("model_path", DEFAULT_MODEL_PATH),
                 ("device", "0"),
                 ("conf", 0.30),
-                ("imgsz", 640),
+                ("imgsz", 416),
                 ("inference_hz", 12.0),
                 ("debug_image", True),
                 ("display_windows", True),
                 ("require_depth_hole", True),
-                ("enable_colour_fallback", True),
+                ("enable_colour_fallback", False),
                 ("yolo_confirm_frames", 2),
                 ("colour_confirm_frames", 4),
                 ("max_detection_dist", 4.5),
@@ -142,6 +142,7 @@ class RingDetectorYOLO(Node):
         self.pointcloud_frame_id = "base_link"
         self.marker_id = 0
         self._last_inference_time = 0.0
+        self._last_debug_pub_time = 0.0
         self._frame_seq = 0
         self._candidate_tracks = []
         self.model = None
@@ -435,12 +436,15 @@ class RingDetectorYOLO(Node):
             )
 
         if self.debug_image and debug is not None:
-            try:
-                if debug_status is not None:
-                    self._draw_status(debug, debug_status)
-                self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, "bgr8"))
-            except Exception:
-                pass
+            debug_now = time.monotonic()
+            if accepted > 0 or debug_now - self._last_debug_pub_time >= 0.2:
+                self._last_debug_pub_time = debug_now
+                try:
+                    if debug_status is not None:
+                        self._draw_status(debug, debug_status)
+                    self.debug_pub.publish(self.bridge.cv2_to_imgmsg(debug, "bgr8"))
+                except Exception:
+                    pass
 
         self._show_windows(debug, depth_snapshot, frame.shape, depth_boxes, debug_status)
 
@@ -466,12 +470,6 @@ class RingDetectorYOLO(Node):
             if show_reject:
                 self._draw_debug(debug, x1, y1, x2, y2, "unknown", conf, accepted=False, source=source)
             return False
-
-        if source == "yolo" and colour in ("red", "green", "blue", "black"):
-            if self._colour_box_ring_score(frame, colour, x1, y1, x2, y2) is None:
-                self._draw_debug(debug, x1, y1, x2, y2, colour, conf, accepted=False, source="yolo-shape")
-                depth_boxes.append((x1, y1, x2, y2, colour, False))
-                return False
 
         if not depth_ready:
             if show_reject:
