@@ -85,7 +85,7 @@ def generate_launch_description():
     ring_camera_info_topic = LaunchConfiguration('ring_camera_info_topic')
 
     waypoints_file = PythonExpression([
-        "'irl-waypoints.yaml' if '", real_robot, "' == 'true' else 'waypoints.yaml'"
+        "'waypoints.yaml' if '", real_robot, "' == 'true' else 'waypoints.yaml'"
     ])
 
     # Node from dis_tutorial3 package
