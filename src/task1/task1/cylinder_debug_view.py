@@ -76,6 +76,9 @@ class CylinderDebugView(Node):
     def __init__(self):
         super().__init__("cylinder_debug_view")
 
+        self.declare_parameter("show_windows", False)
+        self.show_windows = self.get_parameter("show_windows").value
+
         self.bridge = CvBridge()
         self.latest_image = None
         self.top_camera_image = None
@@ -245,8 +248,9 @@ class CylinderDebugView(Node):
                 y_pos += 26
 
 
-        cv2.imshow("Cylinder Debug (bottom camera)", img)
-        cv2.waitKey(1)
+        if self.show_windows:
+            cv2.imshow("Cylinder Debug (bottom camera)", img)
+            cv2.waitKey(1)
 
         try:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(img, "bgr8"))
@@ -288,8 +292,9 @@ class CylinderDebugView(Node):
                         (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (160, 160, 160), 1, cv2.LINE_AA)
 
-        cv2.imshow("Top Camera (spill detection)", img)
-        cv2.waitKey(1)
+        if self.show_windows:
+            cv2.imshow("Top Camera (spill detection)", img)
+            cv2.waitKey(1)
 
         try:
             self.top_debug_pub.publish(self.bridge.cv2_to_imgmsg(img, "bgr8"))

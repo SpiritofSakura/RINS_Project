@@ -45,17 +45,17 @@ float z_limit_low = -0.25;
 float z_limit_high = 0.5;
 
 // RANSAC
-int ransac_max_iterations = 100;
+int ransac_max_iterations = 150;
 float ransac_normal_distance_weight = 0.1;
 float ransac_distance_threshold = 0.01;
 
 float marker_height = 0.4;
-int max_detected_cylinders = 3;
-int min_cylinder_size = 500;
+int max_detected_cylinders = 12;
+int min_cylinder_size = 220;
 float min_z_spread = 0.07f;   // reject flat objects (floor markings) — real cylinders span >7cm vertically
 float max_z_spread = 0.50f;   // reject tall objects (boxes, walls) — barrels are at most ~40cm tall
 float min_horizontal_axis_z = -0.30f; // reject horizontal detections whose axis center is at floor level (curbs etc.)
-float min_saturation = 0.30f; // HSV saturation threshold — rejects grey/beige boxes; black barrels pass via value check
+float min_saturation = 0.22f; // HSV saturation threshold — rejects grey/beige boxes; black barrels pass via value check
 float max_value_for_black = 0.25f; // brightness ceiling — allows black barrels to bypass saturation check
 
 void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
@@ -171,7 +171,7 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     int marker_id = 0;
     int detected_cylinders = 0;
 
-    while (detected_cylinders <= max_detected_cylinders) {
+    while (detected_cylinders < max_detected_cylinders) {
 
         pcl::PointIndices::Ptr inliers_cylinder(new pcl::PointIndices);
         pcl::ModelCoefficients::Ptr coefficients_cylinder(new pcl::ModelCoefficients);
@@ -374,7 +374,7 @@ int main(int argc, char** argv) {
     // create publishers
     planes_pub = node->create_publisher<sensor_msgs::msg::PointCloud2>("filtered_point_cloud", 1);
     cylinder_pub = node->create_publisher<sensor_msgs::msg::PointCloud2>("cylinder_point_cloud", 1);
-    marker_pub = node->create_publisher<visualization_msgs::msg::Marker>("cylinder_markers", 1);
+    marker_pub = node->create_publisher<visualization_msgs::msg::Marker>("cylinder_markers", 10);
 
     rclcpp::spin(node);
     rclcpp::shutdown();

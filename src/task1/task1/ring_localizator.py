@@ -8,17 +8,22 @@ frame, and publishes a persistent coloured marker once a location is confirmed.
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from rclpy.duration import Duration
 
 from visualization_msgs.msg import Marker
 from std_msgs.msg import String
 import tf2_ros
 import math
 from collections import Counter
+from statistics import median
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-CLUSTER_RADIUS   = 0.7    # m — detections within this radius → same ring
-CONFIRM_THRESH   = 7      # detections needed to confirm a ring
-MIN_MARK_DIST    = 0.7    # m — minimum distance between two confirmed rings
+CLUSTER_RADIUS   = 0.45   # m — detections within this radius → same ring
+FAIR_THRESH      = 2      # detections before showing a temporary candidate marker
+ACTION_THRESH    = 4      # detections before behavior may approach the ring
+CONFIRM_THRESH   = 6      # detections needed to confirm a ring marker solidly
+MIN_MARK_DIST    = 0.5    # m — minimum distance between two confirmed rings
+ACTION_INLIER_RADIUS = 0.30
 MAX_RAW_PTS      = 500    # max points stored per cluster before trimming
 
 SENSOR_QOS = QoSProfile(
@@ -30,13 +35,16 @@ SENSOR_QOS = QoSProfile(
 
 class Cluster:
     """Running accumulator for a candidate ring location."""
-    __slots__ = ('points', 'centroid', 'colour_votes', 'confirmed')
+    __slots__ = ('points', 'centroid', 'colour_votes', 'actionable', 'confirmed', 'suppressed', 'cluster_id')
 
-    def __init__(self, x, y, z, colour):
+    def __init__(self, x, y, z, colour, cluster_id):
         self.points       = [(x, y, z)]
         self.centroid     = (x, y, z)
         self.colour_votes = Counter({colour: 1})
+        self.actionable   = False
         self.confirmed    = False
+        self.suppressed   = False
+        self.cluster_id   = cluster_id
 
     def add(self, x, y, z, colour):
         if len(self.points) < MAX_RAW_PTS:
@@ -56,6 +64,29 @@ class Cluster:
     @property
     def best_colour(self):
         return self.colour_votes.most_common(1)[0][0]
+
+    @property
+    def robust_centroid(self):
+        points = self.compact_points
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        zs = [p[2] for p in points]
+        return median(xs), median(ys), median(zs)
+
+    @property
+    def compact_points(self):
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        mx = median(xs)
+        my = median(ys)
+        compact = [
+            p for p in self.points
+            if math.sqrt((p[0] - mx) ** 2 + (p[1] - my) ** 2) <= ACTION_INLIER_RADIUS
+        ]
+        return compact if len(compact) >= max(3, int(0.6 * len(self.points))) else self.points
+
+    def compact_enough(self, min_count):
+        return len(self.compact_points) >= min_count
 
     def dist2d(self, x, y):
         return math.sqrt((self.centroid[0] - x) ** 2 +
@@ -101,6 +132,7 @@ class RingLocalizator(Node):
 
         self.clusters: list[Cluster] = []
         self.marker_id_counter = 0
+        self.cluster_id_counter = 0
 
         self.get_logger().info(
             f"RingLocalizator ready — "
@@ -113,13 +145,9 @@ class RingLocalizator(Node):
     # ──────────────────────────────────────────────────────────────────────────
     def marker_callback(self, marker_msg: Marker):
         try:
-            x_bl = marker_msg.pose.position.x
-            y_bl = marker_msg.pose.position.y
-            z_bl = marker_msg.pose.position.z
-
-            tf = self.tf_buffer.lookup_transform(
-                'map', 'base_link', rclpy.time.Time())
-            x, y, z = self._transform_point(x_bl, y_bl, z_bl, tf)
+            x, y, z = self._marker_to_map(marker_msg)
+            if not all(math.isfinite(v) for v in (x, y, z)):
+                return
 
         except tf2_ros.TransformException as ex:
             self.get_logger().warn(f"TF failed: {ex}")
@@ -139,28 +167,90 @@ class RingLocalizator(Node):
                 best, best_d = c, d
 
         if best is None or best_d > CLUSTER_RADIUS:
-            best = Cluster(x, y, z, colour)
+            best = Cluster(x, y, z, colour, self.cluster_id_counter)
+            self.cluster_id_counter += 1
             self.clusters.append(best)
         else:
             best.add(x, y, z, colour)
 
+        if best.suppressed:
+            return
+
+        if best.confirmed:
+            self._publish_marker(*best.robust_centroid, best.best_colour,
+                                 status="ring_confirmed", marker_id=best.cluster_id)
+            return
+
+        if best.actionable:
+            self._publish_marker(*best.robust_centroid, best.best_colour,
+                                 status="ring_actionable", marker_id=best.cluster_id)
+
+        elif best.count >= FAIR_THRESH and not best.confirmed:
+            self._publish_marker(*best.robust_centroid, best.best_colour,
+                                 status="ring_candidate", marker_id=best.cluster_id)
+
+        if best.count >= ACTION_THRESH and not best.actionable and best.compact_enough(ACTION_THRESH):
+            self._try_make_actionable(best)
+
         # Check for confirmation
-        if best.count >= CONFIRM_THRESH and not best.confirmed:
+        if best.count >= CONFIRM_THRESH and not best.confirmed and best.compact_enough(CONFIRM_THRESH):
             self._try_confirm(best)
 
     # ──────────────────────────────────────────────────────────────────────────
+    def _marker_to_map(self, marker_msg: Marker):
+        source_frame = marker_msg.header.frame_id.lstrip('/') or 'base_link'
+        if source_frame == 'map':
+            p = marker_msg.pose.position
+            return p.x, p.y, p.z
+
+        stamp = marker_msg.header.stamp
+        lookup_time = (
+            rclpy.time.Time.from_msg(stamp)
+            if stamp.sec != 0 or stamp.nanosec != 0
+            else rclpy.time.Time()
+        )
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                'map', source_frame, lookup_time, timeout=Duration(seconds=0.05)
+            )
+        except tf2_ros.TransformException:
+            tf = self.tf_buffer.lookup_transform(
+                'map', source_frame, rclpy.time.Time(), timeout=Duration(seconds=0.05)
+            )
+
+        p = marker_msg.pose.position
+        return self._transform_point(p.x, p.y, p.z, tf)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _try_make_actionable(self, cluster: Cluster):
+        cx, cy, cz = cluster.robust_centroid
+        for c in self.clusters:
+            if (c.confirmed or c.actionable) and c.dist2d(cx, cy) < MIN_MARK_DIST:
+                cluster.suppressed = True
+                return
+
+        cluster.actionable = True
+        self._publish_marker(cx, cy, cz, cluster.best_colour,
+                             status="ring_actionable", marker_id=cluster.cluster_id)
+        self.get_logger().info(
+            f"Ring actionable: colour={cluster.best_colour} "
+            f"pos=({cx:.2f}, {cy:.2f}) detections={cluster.count}"
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
     def _try_confirm(self, cluster: Cluster):
-        cx, cy, cz = cluster.centroid
+        cx, cy, cz = cluster.robust_centroid
 
         # Don't confirm if too close to an already-confirmed ring
         for c in self.clusters:
             if c.confirmed and c.dist2d(cx, cy) < MIN_MARK_DIST:
-                cluster.confirmed = True  # suppress future checks
+                cluster.suppressed = True
                 return
 
         cluster.confirmed = True
+        cluster.actionable = True
         colour = cluster.best_colour
-        self._publish_marker(cx, cy, cz, colour)
+        self._publish_marker(cx, cy, cz, colour, status="ring_confirmed", marker_id=cluster.cluster_id)
         self.get_logger().info(
             f"Ring confirmed: colour={colour}  "
             f"pos=({cx:.2f}, {cy:.2f})  "
@@ -169,27 +259,44 @@ class RingLocalizator(Node):
         )
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _publish_marker(self, x, y, z, colour):
+    def _publish_marker(self, x, y, z, colour, status="ring_confirmed", marker_id=None):
         r, g, b = MARKER_COLOURS.get(colour, (1.0, 1.0, 1.0))
+        confirmed = status == "ring_confirmed"
+        actionable = status == "ring_actionable"
 
         marker = Marker()
         marker.header.frame_id = "map"
         marker.header.stamp    = self.get_clock().now().to_msg()
-        marker.type            = Marker.CYLINDER
-        marker.id              = self.marker_id_counter
-        self.marker_id_counter += 1
+        marker.ns              = status
+        marker.type            = Marker.SPHERE
+        marker.id              = int(marker_id) if marker_id is not None else self.marker_id_counter
+        if marker_id is None:
+            self.marker_id_counter += 1
+        marker.action          = Marker.ADD
 
         marker.pose.position.x = x
         marker.pose.position.y = y
         marker.pose.position.z = z
         marker.pose.orientation.w = 1.0
 
-        marker.scale.x = marker.scale.y = 0.25
-        marker.scale.z = 0.05
+        if confirmed:
+            marker.scale.x = marker.scale.y = 0.35
+            marker.scale.z = 0.10
+            marker.color.a = 1.0
+        elif actionable:
+            marker.scale.x = marker.scale.y = 0.30
+            marker.scale.z = 0.08
+            marker.color.a = 0.85
+        else:
+            marker.scale.x = marker.scale.y = 0.22
+            marker.scale.z = 0.06
+            marker.color.a = 0.45
+            marker.lifetime.sec = 0
+            marker.lifetime.nanosec = 700_000_000
 
         marker.color.r, marker.color.g, marker.color.b = r, g, b
-        marker.color.a = 1.0
-        # No lifetime - confirmed rings persist permanently
+        marker.text = status.replace("ring_", "")
+        # No lifetime for confirmed rings; candidates are refreshed while visible.
         
         self.ring_locations_pub.publish(marker)
 

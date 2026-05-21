@@ -35,7 +35,7 @@ HOUGH_DP = 1                    # Inverse ratio of accumulator resolution
 HOUGH_MIN_DIST = 40             # Minimum distance between circle centres
 HOUGH_PARAM1 = 48               # Upper threshold for Canny edge (balanced strictness)
 HOUGH_PARAM2 = 25               # Accumulator threshold (strict but allows real rings)
-HOUGH_MIN_RADIUS = 1          # Minimum circle radius in pixels (lowered to detect black ring)
+HOUGH_MIN_RADIUS = 6          # Very small circles are usually texture/noise
 HOUGH_MAX_RADIUS = 70          # Maximum circle radius (px)
 
 # ── Cross-frame confirmation ──────────────────────────────────────────────────
@@ -46,6 +46,17 @@ MATCH_DIST_PX = 35              # pixel radius to match circles between frames
 # ── Depth verification ────────────────────────────────────────────────────────
 MAX_RANGE_M = 7.0               # beyond this → "nothing" / sky
 RIM_SOLID_FRAC = 0.35           # fraction of rim samples that must be solid
+CENTER_RADIUS_FRAC = 0.42       # centre disk that should be hollow/far
+RIM_INNER_FRAC = 0.62           # annulus inner radius
+RIM_OUTER_FRAC = 1.12           # annulus outer radius
+CENTER_VALID_MAX_FRAC = 0.22    # hollow centre has few valid/depth pixels
+CENTER_FAR_DELTA_M = 0.12       # or centre surface is this much behind rim
+SOLID_CENTER_MIN_FRAC = 0.35    # barrel caps usually have many centre depth pixels
+SOLID_CENTER_MAX_GAP_M = 0.22   # centre close to rim => solid cap, not a hole
+SOLID_CENTER_MAX_STD_M = 0.12   # smooth centre depth => planar barrel end-cap
+CENTER_VISUAL_SOLID_MAX_FRAC = 0.30  # missing depth but visually filled => likely barrel cap
+FRONT_BARREL_VISUAL_FILL_MIN_FRAC = 0.60
+MIN_RIM_POINTS = 25             # minimum point-cloud points for localization
 
 # ── Colour HSV ranges (from detect_rings.py) ──────────────────────────────────
 COLOUR_RANGES = {
@@ -93,6 +104,7 @@ class RingDetectorV2(Node):
         self.image_header = None  # Store image header for marker timestamps
         self.pointcloud_xyz = None  # Point cloud XYZ positions
         self.pointcloud_rgb = None  # Point cloud RGB colors
+        self.pointcloud_frame_id = None
 
         # Robot state for conditional publishing
         self.robot_state = 'IDLE'
@@ -115,12 +127,12 @@ class RingDetectorV2(Node):
 
         # Publishers
         self.marker_pub = self.create_publisher(Marker, "/ring_marker", 10)
+        self.front_barrel_pub = self.create_publisher(Marker, "cylinder_markers", 10)
         self.colour_pub = self.create_publisher(String, "/ring_colour", 10)
 
-        # Debug windows
-        cv2.namedWindow("Disparity", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Hough Circles", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Masked view", cv2.WINDOW_NORMAL)
+        # Keep one lightweight camera window for ring debugging. Extra disparity
+        # and mask windows are expensive and make the full task stack sluggish.
+        cv2.namedWindow("Ring Camera", cv2.WINDOW_NORMAL)
         
         # Store combined mask for color extraction
         self.combined_mask = None
@@ -148,6 +160,7 @@ class RingDetectorV2(Node):
                 self.get_logger().error(f"Point cloud XYZ empty or None")
                 return
             self.pointcloud_xyz = pts_xyz.reshape((data.height, data.width, 3))
+            self.pointcloud_frame_id = data.header.frame_id
             
             # Try to extract RGB field
             pts_rgb = None
@@ -204,51 +217,46 @@ class RingDetectorV2(Node):
         disparity_mask = (disparity > 0).astype(np.uint8) * 255
         
         frame_detections = []
+        accepted_circles = set()
+        front_barrel_circles = set()
         if circles is not None:
-            self.get_logger().info(f"Hough found {len(circles[0])} circles - publishing all")
+            self.get_logger().debug(f"Hough found {len(circles[0])} circles")
             for circle in circles[0]:
                 cx, cy, radius = int(circle[0]), int(circle[1]), int(circle[2])
                 ring = self._evaluate_circle(cx, cy, radius, depth_m, self.rgb_image, disparity_mask)
                 if ring is not None:
-                    frame_detections.append(ring)
-            self.get_logger().info(f"Publishing {len(frame_detections)} detections")
+                    if ring.get("kind") == "front_barrel":
+                        self._publish_front_barrel_marker(ring)
+                        front_barrel_circles.add((cx, cy, radius))
+                    else:
+                        frame_detections.append(ring)
+                        accepted_circles.add((cx, cy, radius))
+            if frame_detections:
+                self.get_logger().info(f"Accepted {len(frame_detections)} hollow ring detections")
 
         # ── Publish each valid detection IMMEDIATELY ───────────────────────────────────
         for detection in frame_detections:
             # Publish to /ring_marker (color will be inferred from patch mask)
             # Let ring_localizator handle aggregation and confirmation
-            self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'], 
-                                     detection['ring_patch'], detection['radius'], detection['patch_mask'])
+            self._publish_marker_raw(detection)
 
-        # Debug visualization
+        # Lightweight camera visualization
         debug_img = self.rgb_image.copy()
-        ring_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
-        combined_visualization_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
         if circles is not None:
             for circle in circles[0]:
                 cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
-                cv2.circle(debug_img, (cx, cy), r, (0, 255, 0), 2)
-                cv2.circle(debug_img, (cx, cy), 2, (0, 0, 255), 3)
-                # Create mask for detected rings
-                cv2.circle(ring_mask, (cx, cy), r, 255, -1)
-        
-        # Dilate ring mask by 20% (to expand ring boundaries)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        dilated_ring_mask = cv2.dilate(ring_mask, kernel, iterations=2)
-        
-        # Combine: dilated ring mask AND disparity mask (valid depth)
-        combined_mask_display = cv2.bitwise_and(dilated_ring_mask, disparity_mask)
-        
-        # Apply combined mask (dilated ring + disparity) to RGB image for visualization
-        masked_view = cv2.bitwise_and(self.rgb_image, self.rgb_image, mask=combined_mask_display)
-        
-        # Combine ring mask with color+disparity mask to see intersection
-        combined_visualization = cv2.bitwise_and(ring_mask, combined_mask_display)
+                accepted = (cx, cy, r) in accepted_circles
+                front_barrel = (cx, cy, r) in front_barrel_circles
+                if accepted:
+                    draw_color = (0, 255, 0)
+                elif front_barrel:
+                    draw_color = (255, 128, 0)
+                else:
+                    draw_color = (0, 0, 255)
+                cv2.circle(debug_img, (cx, cy), r, draw_color, 2)
+                cv2.circle(debug_img, (cx, cy), 2, draw_color, 3)
 
-        cv2.imshow("Disparity", disparity_8u)
-        cv2.imshow("Hough Circles", debug_img)
-        cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
-        cv2.imshow("Masked view", combined_visualization)
+        cv2.imshow("Ring Camera", debug_img)
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
@@ -257,32 +265,108 @@ class RingDetectorV2(Node):
 
     def _evaluate_circle(self, cx, cy, radius, depth_m, rgb_img, disparity_mask):
         """
-        Accept any circle Hough found - let ring_localizator handle robustness via aggregation.
-        Extract ring patch for color classification, using combined dilated ring + disparity mask.
+        Verify that a Hough circle is a 3D ring, not a barrel end or printed circle.
+
+        A real ring has a solid depth annulus and a centre that is either invalid
+        through the hole or significantly farther away than the rim.
         """
         h, w = depth_m.shape
-        if not (radius < cx < w - radius and radius < cy < h - radius):
+        margin = int(radius * RIM_OUTER_FRAC) + 2
+        if not (margin < cx < w - margin and margin < cy < h - margin):
             return None
 
-        # Get center depth for marker position
-        centre_depth = depth_m[cy, cx]
-        if centre_depth < 0.1 or centre_depth > MAX_RANGE_M:
-            # Use a default distance if depth is invalid
-            centre_depth = 1.0
+        valid_depth = (depth_m > 0.1) & (depth_m < MAX_RANGE_M)
 
-        # Create individual ring mask for this circle
-        ring_circle_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.circle(ring_circle_mask, (cx, cy), radius, 255, -1)
-        
-        # Dilate ring mask by 20% (to expand ring boundaries)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        dilated_circle_mask = cv2.dilate(ring_circle_mask, kernel, iterations=2)
-        
-        # Combine: dilated ring circle mask AND disparity mask (valid depth)
-        combined_circle_mask = cv2.bitwise_and(dilated_circle_mask, disparity_mask)
+        center_mask = self._circle_mask(
+            (h, w), cx, cy, max(2, int(radius * CENTER_RADIUS_FRAC))
+        )
+        rim_mask = self._annulus_mask(
+            (h, w),
+            cx,
+            cy,
+            max(3, int(radius * RIM_INNER_FRAC)),
+            max(4, int(radius * RIM_OUTER_FRAC)),
+        )
+
+        rim_total = int(np.count_nonzero(rim_mask))
+        center_total = int(np.count_nonzero(center_mask))
+        if rim_total == 0 or center_total == 0:
+            return None
+
+        rim_valid = rim_mask & valid_depth
+        center_valid = center_mask & valid_depth
+        rim_valid_frac = float(np.count_nonzero(rim_valid)) / rim_total
+        center_valid_frac = float(np.count_nonzero(center_valid)) / center_total
+        if rim_valid_frac < RIM_SOLID_FRAC:
+            return None
+
+        rim_depths = depth_m[rim_valid]
+        if len(rim_depths) < MIN_RIM_POINTS:
+            return None
+
+        rim_depth = float(np.median(rim_depths))
+        rim_surface = rim_valid & (np.abs(depth_m - rim_depth) <= max(0.12, 0.08 * rim_depth))
+        if np.count_nonzero(rim_surface) < MIN_RIM_POINTS:
+            rim_surface = rim_valid
+
+        rim_colour = self._classify_ring_colour_with_mask(
+            rgb_img, rim_surface.astype(np.uint8) * 255
+        )
+        if rim_colour == "unknown":
+            return None
+
+        center_colour = self._classify_ring_colour_with_mask(
+            rgb_img, center_mask.astype(np.uint8) * 255
+        )
+        if rim_colour not in ("unknown", "black") and center_colour == rim_colour:
+            front_barrel = self._make_front_barrel_detection(
+                cx, cy, radius, rgb_img, valid_depth, rim_surface, center_mask
+            )
+            if front_barrel is not None:
+                return front_barrel
+            return None
+
+        center_visual_fill = self._visual_fill_fraction(rgb_img, center_mask)
+        center_depths = depth_m[center_valid]
+        hollow_by_missing_depth = center_valid_frac <= CENTER_VALID_MAX_FRAC
+        hollow_by_far_depth = False
+        if len(center_depths) > 0:
+            center_depth = float(np.median(center_depths))
+            center_depth_std = float(np.std(center_depths))
+            center_gap = center_depth - rim_depth
+            solid_center = (
+                center_valid_frac >= SOLID_CENTER_MIN_FRAC
+                and center_gap <= max(SOLID_CENTER_MAX_GAP_M, 0.06 * rim_depth)
+                and center_depth_std <= SOLID_CENTER_MAX_STD_M
+            )
+            if solid_center:
+                front_barrel = self._make_front_barrel_detection(
+                    cx, cy, radius, rgb_img, valid_depth, rim_surface, center_mask
+                )
+                if front_barrel is not None:
+                    return front_barrel
+                return None
+            hollow_by_far_depth = (center_depth - rim_depth) >= max(CENTER_FAR_DELTA_M, 0.03 * rim_depth)
+
+        if hollow_by_missing_depth and center_visual_fill >= FRONT_BARREL_VISUAL_FILL_MIN_FRAC:
+            front_barrel = self._make_front_barrel_detection(
+                cx, cy, radius, rgb_img, valid_depth, rim_surface, center_mask
+            )
+            if front_barrel is not None:
+                return front_barrel
+            hollow_by_missing_depth = False
+
+        if center_visual_fill >= CENTER_VISUAL_SOLID_MAX_FRAC and not hollow_by_far_depth:
+            hollow_by_missing_depth = False
+
+        if not (hollow_by_missing_depth or hollow_by_far_depth):
+            return None
+
+        point = self._point_from_mask(rim_surface)
+        if point is None:
+            return None
 
         # Extract ring patch for colour classification
-        # Use combined_mask (dilated ring + disparity) to get only valid ring pixels
         patch_size = max(int(radius * 2.5), 64)
         x1 = max(0, cx - patch_size // 2)
         x2 = min(w, cx + patch_size // 2)
@@ -291,13 +375,115 @@ class RingDetectorV2(Node):
         
         # Extract patch and its corresponding mask
         ring_patch = rgb_img[y1:y2, x1:x2].copy()
-        patch_mask = combined_circle_mask[y1:y2, x1:x2]
+        patch_mask = (rim_surface.astype(np.uint8) * 255)[y1:y2, x1:x2]
 
         return {
             "cx": cx, "cy": cy, "radius": radius,
-            "depth_m": centre_depth, "ring_patch": ring_patch,
-            "patch_mask": patch_mask  # Pass mask for color extraction
+            "point": point,
+            "frame_id": self.pointcloud_frame_id or "base_link",
+            "ring_patch": ring_patch,
+            "patch_mask": patch_mask,
+            "hollow_score": 1.0 - center_valid_frac,
+            "kind": "ring",
         }
+
+    @staticmethod
+    def _circle_mask(shape, cx, cy, radius):
+        mask = np.zeros(shape, dtype=np.uint8)
+        cv2.circle(mask, (cx, cy), radius, 255, -1)
+        return mask > 0
+
+    @staticmethod
+    def _annulus_mask(shape, cx, cy, inner_radius, outer_radius):
+        outer = np.zeros(shape, dtype=np.uint8)
+        inner = np.zeros(shape, dtype=np.uint8)
+        cv2.circle(outer, (cx, cy), outer_radius, 255, -1)
+        cv2.circle(inner, (cx, cy), inner_radius, 255, -1)
+        return (outer > 0) & (inner == 0)
+
+    def _visual_fill_fraction(self, rgb_img, mask):
+        if rgb_img is None or rgb_img.size == 0:
+            return 0.0
+        total = int(np.count_nonzero(mask))
+        if total == 0:
+            return 0.0
+
+        hsv = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2HSV)
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
+
+        coloured_surface = (s > 45) & (v > 35)
+        dark_surface = (v > 12) & (v < 85)
+        object_like = mask & (coloured_surface | dark_surface)
+        return float(np.count_nonzero(object_like)) / total
+
+    def _mean_rgb_from_mask(self, rgb_img, mask):
+        if rgb_img is None or rgb_img.size == 0:
+            return None
+        if np.count_nonzero(mask) == 0:
+            return None
+
+        hsv = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2HSV)
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
+        useful = mask & (((s > 35) & (v > 30)) | ((v > 12) & (v < 95)))
+        pixels = rgb_img[useful]
+        if len(pixels) < 10:
+            pixels = rgb_img[mask & (v > 12)]
+        if len(pixels) < 10:
+            return None
+
+        median_bgr = np.median(pixels, axis=0)
+        b, g, r = median_bgr / 255.0
+        return float(r), float(g), float(b)
+
+    def _make_front_barrel_detection(self, cx, cy, radius, rgb_img, valid_depth, rim_surface, center_mask):
+        cap_mask = self._circle_mask(
+            valid_depth.shape, cx, cy, max(3, int(radius * 0.88))
+        )
+        surface_mask = rim_surface | (center_mask & valid_depth)
+        if np.count_nonzero(surface_mask) < MIN_RIM_POINTS:
+            surface_mask = rim_surface
+
+        point = self._point_from_mask(surface_mask)
+        if point is None:
+            return None
+
+        visual_fill = self._visual_fill_fraction(rgb_img, center_mask)
+        center_depth_points = int(np.count_nonzero(center_mask & valid_depth))
+        if visual_fill < FRONT_BARREL_VISUAL_FILL_MIN_FRAC:
+            return None
+        if center_depth_points < MIN_RIM_POINTS and visual_fill < 0.75:
+            return None
+
+        rgb = self._mean_rgb_from_mask(rgb_img, cap_mask | rim_surface)
+        if rgb is None:
+            rgb = (0.5, 0.5, 0.5)
+
+        return {
+            "kind": "front_barrel",
+            "cx": cx,
+            "cy": cy,
+            "radius": radius,
+            "point": point,
+            "frame_id": self.pointcloud_frame_id or "base_link",
+            "rgb": rgb,
+            "visual_fill": visual_fill,
+        }
+
+    def _point_from_mask(self, mask):
+        if self.pointcloud_xyz is None:
+            return None
+        if self.pointcloud_xyz.shape[:2] != mask.shape:
+            return None
+
+        pts = self.pointcloud_xyz[mask]
+        if len(pts) < MIN_RIM_POINTS:
+            return None
+        pts = pts[np.all(np.isfinite(pts), axis=1)]
+        if len(pts) < MIN_RIM_POINTS:
+            return None
+        return np.median(pts, axis=0)
 
     def _classify_ring_colour_with_mask(self, ring_patch, patch_mask):
         """
@@ -539,118 +725,113 @@ class RingDetectorV2(Node):
             self.get_logger().warn(f"Failed to classify PC RGB: {e}")
             return "unknown"
 
-    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch, radius, patch_mask):
+    def _detection_enabled(self):
+        return self.robot_state in (
+            "IDLE",
+            "PATROL",
+            "APPROACH_FACE",
+            "INTERACT_FACE",
+            "APPROACH_RING",
+            "INTERACT_RING",
+            "APPROACH_BARREL",
+            "INTERACT_BARREL",
+        )
+
+    def _publish_front_barrel_marker(self, detection):
+        if not self._detection_enabled():
+            return
+        if self.image_header is None:
+            return
+
+        point = detection["point"]
+        r, g, b = detection.get("rgb", (0.5, 0.5, 0.5))
+
+        marker = Marker()
+        marker.header.frame_id = detection["frame_id"]
+        marker.header.stamp = self.image_header.stamp
+        marker.ns = "front_barrel_raw"
+        marker.type = Marker.CYLINDER
+        marker.id = self.marker_id_counter
+        self.marker_id_counter += 1
+        marker.action = Marker.ADD
+        marker.lifetime = Duration(sec=0, nanosec=250_000_000)
+
+        marker.pose.position.x = float(point[0])
+        marker.pose.position.y = float(point[1])
+        marker.pose.position.z = float(point[2])
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.24
+        marker.scale.y = 0.24
+        marker.scale.z = 0.35
+        marker.color.r = float(r)
+        marker.color.g = float(g)
+        marker.color.b = float(b)
+        marker.color.a = 1.0
+        marker.text = "horizontal"
+
+        self.front_barrel_pub.publish(marker)
+        self.get_logger().info(
+            f"Published front-facing barrel candidate: "
+            f"pos=({point[0]:.2f}, {point[1]:.2f}, {point[2]:.2f}) "
+            f"frame={marker.header.frame_id}"
+        )
+
+    def _publish_marker_raw(self, detection):
         """
         Publish raw detection to /ring_marker using 3D position and color from image.
         Uses patch_mask to extract color from only the valid ring pixels (filters grey holder).
         Ring_localizator will aggregate 10+ detections in 0.6m radius for confirmation.
-        Only publishes if robot is in IDLE or PATROL state.
+        Only publishes while the behavior manager is in a detection-capable state.
         """
-        # Only publish when idle or on patrol - avoid interfering with other tasks
-        if self.robot_state not in ['IDLE', 'PATROL']:
+        if not self._detection_enabled():
             return
         
         if self.image_header is None:
             return
 
-        # Get 3D position from point cloud (accurate, in base_link frame)
-        x, y, z = None, None, None
-        used_pointcloud = False
-        
-        if self.pointcloud_xyz is not None:
-            try:
-                # Get 3D position from center or nearby points
-                neighbors_for_position = [
-                    (cy, cx),  # center
-                    (cy, cx + 10),  # right
-                    (cy, cx - 10),  # left
-                    (cy + 10, cx),  # down
-                    (cy - 10, cx),  # up
-                ]
-                
-                for ny, nx in neighbors_for_position:
-                    ny_clamped = max(0, min(ny, self.pointcloud_xyz.shape[0] - 1))
-                    nx_clamped = max(0, min(nx, self.pointcloud_xyz.shape[1] - 1))
-                    pt = self.pointcloud_xyz[int(ny_clamped), int(nx_clamped), :]
-                    
-                    if np.all(np.isfinite(pt)):
-                        x, y, z = pt[0], pt[1], pt[2]
-                        used_pointcloud = True
-                        break
-                        
-            except Exception as e:
-                self.get_logger().debug(f"Failed to get point cloud position: {e}")
-
-        # Reject detection if no valid 3D position found - don't publish false positives
-
-        if x is None or y is None or z is None:
-            return
-
         # Extract color from ring patch using the mask (filters out grey holder)
         # This is more reliable than point cloud samples because we know the ring pixels
-        colour = self._classify_ring_colour_with_mask(ring_patch, patch_mask)
+        colour = self._classify_ring_colour_with_mask(
+            detection['ring_patch'], detection['patch_mask']
+        )
+        point = detection['point']
 
         r, g, b = MARKER_COLOURS.get(colour, (0.5, 0.5, 0.5))
 
         marker = Marker()
-        marker.header.frame_id = "base_link"
+        marker.header.frame_id = detection['frame_id']
         marker.header.stamp = self.image_header.stamp  # Use image timestamp, not clock
-        marker.type = Marker.CYLINDER
+        marker.ns = "ring_raw"
+        marker.type = Marker.SPHERE
         marker.id = self.marker_id_counter  # Incrementing ID like face detector
         self.marker_id_counter += 1
         marker.action = Marker.ADD
         # Raw markers disappear after 0.2 seconds (let aggregator handle persistence)
         marker.lifetime = Duration(sec=0, nanosec=200_000_000)  # 200ms
 
-        # Position from point cloud (accurate 3D in base_link frame)
-        marker.pose.position.x = float(x)
-        marker.pose.position.y = float(y)
-        marker.pose.position.z = float(z)
+        # Position from the median of valid annulus points in point-cloud frame.
+        marker.pose.position.x = float(point[0])
+        marker.pose.position.y = float(point[1])
+        marker.pose.position.z = float(point[2])
         marker.pose.orientation.w = 1.0
 
         marker.scale.x = marker.scale.y = 0.15
-        marker.scale.z = 0.05
+        marker.scale.z = 0.08
 
         marker.color.r, marker.color.g, marker.color.b = r, g, b
         marker.color.a = 1.0
+        marker.text = "raw"
 
         self.marker_pub.publish(marker)
-        pc_str = "from point cloud" if used_pointcloud else "fallback"
-        self.get_logger().info(f"Published /ring_marker: id={marker.id}, pos=({x:.2f}, {y:.2f}, {z:.2f}) {pc_str}, colour={colour}")
-
-    def _publish_marker(self, ring):
-        """Publish confirmed ring marker. Only publishes if robot is in IDLE or PATROL state."""
-        # Only publish when idle or on patrol - avoid interfering with other tasks
-        if self.robot_state not in ['IDLE', 'PATROL']:
-            return
-        
-        r, g, b = MARKER_COLOURS.get(ring["colour"], (0.5, 0.5, 0.5))
-
-        marker = Marker()
-        marker.header.frame_id = "base_link"
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.type = Marker.CYLINDER
-        marker.id = id(ring)  # Use object id as unique marker id
-
-        # Position relative to camera
-        marker.pose.position.x = ring["depth_m"]
-        marker.pose.position.y = 0.0
-        marker.pose.position.z = 0.0
-        marker.pose.orientation.w = 1.0
-
-        marker.scale.x = marker.scale.y = 0.2
-        marker.scale.z = 0.05
-
-        marker.color.r, marker.color.g, marker.color.b = r, g, b
-        marker.color.a = 1.0
-
-        self.marker_pub.publish(marker)
-
-        # Publish colour as string
         colour_msg = String()
-        colour_msg.data = ring["colour"]
+        colour_msg.data = colour
         self.colour_pub.publish(colour_msg)
-
+        self.get_logger().info(
+            f"Published /ring_marker: id={marker.id}, "
+            f"pos=({point[0]:.2f}, {point[1]:.2f}, {point[2]:.2f}) "
+            f"frame={marker.header.frame_id}, colour={colour}"
+        )
 
 def main(args=None):
     rclpy.init(args=args)

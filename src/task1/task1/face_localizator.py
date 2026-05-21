@@ -2,22 +2,72 @@
 
 import math
 import json
+from collections import Counter
+from statistics import median
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.duration import Duration
 from visualization_msgs.msg import Marker
 from std_msgs.msg import String
 import tf2_ros
+
+
+class FaceCluster:
+    __slots__ = ('points', 'recognition_votes', 'best_recognition', 'confirmed')
+
+    def __init__(self, x, y, z, recognition=None):
+        self.points = [(x, y, z)]
+        self.recognition_votes = Counter()
+        self.best_recognition = None
+        self.confirmed = False
+        self.add_recognition(recognition)
+
+    def add(self, x, y, z, recognition=None):
+        self.points.append((x, y, z))
+        self.add_recognition(recognition)
+
+    def add_recognition(self, recognition):
+        if not recognition:
+            return
+        key = (
+            recognition.get('name', 'Unknown'),
+            recognition.get('role', ''),
+            recognition.get('pronouns', ''),
+            recognition.get('gender', ''),
+        )
+        self.recognition_votes[key] += 1
+        if (
+            self.best_recognition is None
+            or recognition.get('confidence', 0.0) > self.best_recognition.get('confidence', 0.0)
+        ):
+            self.best_recognition = recognition
+
+    @property
+    def count(self):
+        return len(self.points)
+
+    @property
+    def centroid(self):
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        zs = [p[2] for p in self.points]
+        return median(xs), median(ys), median(zs)
+
+    def dist2d(self, x, y):
+        cx, cy, _ = self.centroid
+        return math.sqrt((cx - x) ** 2 + (cy - y) ** 2)
 
 
 class FaceLocalizator(Node):
     def __init__(self):
         super().__init__('face_localizator')
 
-        self.threshold_detections = 10
-        self.cluster_radius = 1.0
-        self.duplicate_radius = 0.9
+        self.threshold_detections = 8
+        self.cluster_radius = 0.6
+        self.duplicate_radius = 0.8
+        self.recognition_radius = 0.8
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -42,7 +92,7 @@ class FaceLocalizator(Node):
             10
         )
 
-        self.all_detections = []
+        self.clusters = []
         # Each entry: {'x': float, 'y': float, 'name': str, 'role': str, 'pronouns': str, 'gender': str}
         self.marked_locations = []
         self.marker_id_counter = 0
@@ -62,32 +112,59 @@ class FaceLocalizator(Node):
             self.recent_recognitions.append(data)
             if len(self.recent_recognitions) > self.max_recognition_buffer:
                 self.recent_recognitions.pop(0)
+            self.update_marked_location_from_recognition(data)
         except json.JSONDecodeError:
             pass
 
     def marker_callback(self, marker_msg):
         try:
-            x_bl = marker_msg.pose.position.x
-            y_bl = marker_msg.pose.position.y
-            z_bl = marker_msg.pose.position.z
+            x_map, y_map, z_map = self.marker_to_map(marker_msg)
+            if not all(math.isfinite(v) for v in (x_map, y_map, z_map)):
+                return
 
-            transform = self.tf_buffer.lookup_transform(
-                'map',
-                'base_link',
-                rclpy.time.Time()
-            )
+            recognition = self._best_recognition_near(x_map, y_map)
+            cluster = self._nearest_cluster(x_map, y_map)
+            if cluster is None or cluster.dist2d(x_map, y_map) > self.cluster_radius:
+                cluster = FaceCluster(x_map, y_map, z_map, recognition)
+                self.clusters.append(cluster)
+            else:
+                cluster.add(x_map, y_map, z_map, recognition)
 
-            x_map, y_map, z_map = self.transform_point(
-                x_bl, y_bl, z_bl, transform
-            )
-
-            self.all_detections.append((x_map, y_map, z_map))
-            self.check_and_mark_location(x_map, y_map)
+            if cluster.count >= self.threshold_detections and not cluster.confirmed:
+                self.try_confirm_cluster(cluster)
 
         except tf2_ros.TransformException as ex:
             self.get_logger().warn(f'TF transform failed, skipping detection: {ex}')
         except Exception as e:
             self.get_logger().error(f'Error processing marker: {e}')
+
+    def marker_to_map(self, marker_msg):
+        source_frame = marker_msg.header.frame_id.lstrip('/') or 'base_link'
+        if source_frame == 'map':
+            p = marker_msg.pose.position
+            return p.x, p.y, p.z
+
+        stamp = marker_msg.header.stamp
+        lookup_time = (
+            rclpy.time.Time.from_msg(stamp)
+            if stamp.sec != 0 or stamp.nanosec != 0
+            else rclpy.time.Time()
+        )
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                'map', source_frame, lookup_time, timeout=Duration(seconds=0.05)
+            )
+        except tf2_ros.TransformException:
+            transform = self.tf_buffer.lookup_transform(
+                'map', source_frame, rclpy.time.Time(), timeout=Duration(seconds=0.05)
+            )
+
+        return self.transform_point(
+            marker_msg.pose.position.x,
+            marker_msg.pose.position.y,
+            marker_msg.pose.position.z,
+            transform,
+        )
 
     def transform_point(self, x, y, z, transform):
         tx = transform.transform.translation.x
@@ -124,49 +201,101 @@ class FaceLocalizator(Node):
         for rec in self.recent_recognitions:
             rx, ry = rec.get('map_x', 0.0), rec.get('map_y', 0.0)
             dist = math.sqrt((rx - x)**2 + (ry - y)**2)
-            if dist <= self.cluster_radius:
+            if dist <= self.recognition_radius:
                 conf = rec.get('confidence', 0.0)
                 if conf > best_conf:
                     best_conf = conf
                     best = rec
         return best
 
-    def check_and_mark_location(self, x, y):
-        detections_in_radius = sum(
-            1 for dx, dy, _ in self.all_detections
-            if math.sqrt((dx - x)**2 + (dy - y)**2) <= self.cluster_radius
-        )
+    def _nearest_cluster(self, x, y):
+        best = None
+        best_d = float('inf')
+        for cluster in self.clusters:
+            d = cluster.dist2d(x, y)
+            if d < best_d:
+                best = cluster
+                best_d = d
+        return best
 
-        if detections_in_radius < self.threshold_detections:
-            return
-
+    def try_confirm_cluster(self, cluster):
+        x, y, z = cluster.centroid
         for loc in self.marked_locations:
             if math.sqrt((loc['x'] - x)**2 + (loc['y'] - y)**2) < self.duplicate_radius:
+                cluster.confirmed = True
                 return
 
-        recognition = self._best_recognition_near(x, y)
-        name = recognition['name'] if recognition else 'Unknown'
-        role = recognition['role'] if recognition else ''
-        pronouns = recognition['pronouns'] if recognition else ''
-        gender = recognition['gender'] if recognition else ''
+        recognition = cluster.best_recognition or self._best_recognition_near(x, y)
+        name = recognition.get('name', 'Unknown') if recognition else 'Unknown'
+        role = recognition.get('role', '') if recognition else ''
+        pronouns = recognition.get('pronouns', '') if recognition else ''
+        gender = recognition.get('gender', '') if recognition else ''
 
-        entry = {'x': x, 'y': y, 'name': name, 'role': role, 'pronouns': pronouns, 'gender': gender}
+        entry = {
+            'x': x,
+            'y': y,
+            'name': name,
+            'role': role,
+            'pronouns': pronouns,
+            'gender': gender,
+            'confidence': recognition.get('confidence', 0.0) if recognition else 0.0,
+            'marker_id': self.marker_id_counter,
+        }
         self.marked_locations.append(entry)
-        self.publish_persistent_marker(x, y, name, role, gender)
+        cluster.confirmed = True
+        self.publish_persistent_marker(x, y, name, role, gender, entry['marker_id'])
+        self.marker_id_counter += 1
 
         self.get_logger().info(
             f'Person confirmed: {name} ({role}, {gender}) '
-            f'at ({x:.2f}, {y:.2f}) — {detections_in_radius} detections'
+            f'at ({x:.2f}, {y:.2f}) — {cluster.count} detections'
         )
 
-    def publish_persistent_marker(self, x, y, name, role, gender=''):
-        marker_id = self.marker_id_counter
-        self.marker_id_counter += 1
+    def update_marked_location_from_recognition(self, recognition):
+        rx = recognition.get('map_x')
+        ry = recognition.get('map_y')
+        if rx is None or ry is None:
+            return
+
+        best = None
+        best_dist = float('inf')
+        for loc in self.marked_locations:
+            dist = math.sqrt((loc['x'] - rx) ** 2 + (loc['y'] - ry) ** 2)
+            if dist < best_dist:
+                best = loc
+                best_dist = dist
+
+        if best is None or best_dist > self.recognition_radius:
+            return
+
+        confidence = recognition.get('confidence', 0.0)
+        if best.get('name') != 'Unknown' and confidence <= best.get('confidence', 0.0):
+            return
+
+        best['name'] = recognition.get('name', best.get('name', 'Unknown'))
+        best['role'] = recognition.get('role', best.get('role', ''))
+        best['pronouns'] = recognition.get('pronouns', best.get('pronouns', ''))
+        best['gender'] = recognition.get('gender', best.get('gender', ''))
+        best['confidence'] = confidence
+
+        self.publish_persistent_marker(
+            best['x'], best['y'], best['name'], best['role'], best['gender'], best['marker_id']
+        )
+        self.get_logger().info(
+            f"Updated face marker label: {best['name']} at ({best['x']:.2f}, {best['y']:.2f})"
+        )
+
+    def publish_persistent_marker(self, x, y, name, role, gender='', marker_id=None):
+        if marker_id is None:
+            marker_id = self.marker_id_counter
+            self.marker_id_counter += 1
 
         sphere = Marker()
         sphere.header.frame_id = 'map'
         sphere.header.stamp = self.get_clock().now().to_msg()
+        sphere.ns = 'face_confirmed'
         sphere.type = Marker.SPHERE
+        sphere.action = Marker.ADD
         sphere.id = marker_id
         sphere.pose.position.x = x
         sphere.pose.position.y = y
@@ -181,6 +310,26 @@ class FaceLocalizator(Node):
         sphere.color.a = 1.0
 
         self.face_locations_pub.publish(sphere)
+
+        label = Marker()
+        label.header.frame_id = 'map'
+        label.header.stamp = sphere.header.stamp
+        label.ns = 'face_label'
+        label.type = Marker.TEXT_VIEW_FACING
+        label.action = Marker.ADD
+        label.id = marker_id
+        label.pose.position.x = x + 0.25
+        label.pose.position.y = y + 0.25
+        label.pose.position.z = 0.55
+        label.pose.orientation.w = 1.0
+        label.scale.z = 0.28
+        label.color.r = 1.0
+        label.color.g = 1.0
+        label.color.b = 1.0
+        label.color.a = 1.0
+        label.text = name if name else 'Unknown'
+
+        self.face_locations_pub.publish(label)
 
 
 def main():

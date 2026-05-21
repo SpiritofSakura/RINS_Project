@@ -7,11 +7,13 @@ import json
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.duration import Duration
 
 from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker
 from std_msgs.msg import String
 from cv_bridge import CvBridge, CvBridgeError
+import tf2_ros
 
 import cv2
 import numpy as np
@@ -66,6 +68,8 @@ class FaceRecognizer(Node):
         self.tolerance = tolerance
         self.bridge = CvBridge()
         self.latest_image = None
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         # Persistent overlay: list of {location, name, gender, role, stamp_ns}
         self.face_overlays = []
         self.overlay_fade_ns = int(3.0 * 1e9)
@@ -158,6 +162,10 @@ class FaceRecognizer(Node):
         if self.latest_image is None:
             return
 
+        map_xy = self._marker_map_xy(marker_msg)
+        if map_xy is None:
+            return
+
         img = self.latest_image.copy()
 
         face_locations = face_recognition.face_locations(img)
@@ -206,8 +214,8 @@ class FaceRecognizer(Node):
                 'role': role,
                 'gender': gender,
                 'confidence': confidence,
-                'map_x': marker_msg.pose.position.x,
-                'map_y': marker_msg.pose.position.y,
+                'map_x': map_xy[0],
+                'map_y': map_xy[1],
             }
 
             msg_out = String()
@@ -217,7 +225,7 @@ class FaceRecognizer(Node):
             self.get_logger().info(
                 f'Recognized: {name} ({role}, {gender}) '
                 f'confidence={confidence:.2f} '
-                f'at map ({marker_msg.pose.position.x:.2f}, {marker_msg.pose.position.y:.2f})'
+                f'at map ({map_xy[0]:.2f}, {map_xy[1]:.2f})'
             )
 
             self.face_overlays.append({
@@ -228,6 +236,57 @@ class FaceRecognizer(Node):
                 'stamp_ns': self.get_clock().now().nanoseconds,
             })
             self.face_overlays = self.face_overlays[-10:]
+
+    def _marker_map_xy(self, marker_msg):
+        source_frame = marker_msg.header.frame_id.lstrip('/') or 'base_link'
+        if source_frame == 'map':
+            return marker_msg.pose.position.x, marker_msg.pose.position.y
+
+        stamp = marker_msg.header.stamp
+        lookup_time = (
+            rclpy.time.Time.from_msg(stamp)
+            if stamp.sec != 0 or stamp.nanosec != 0
+            else rclpy.time.Time()
+        )
+
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                'map', source_frame, lookup_time, timeout=Duration(seconds=0.05)
+            )
+        except tf2_ros.TransformException:
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    'map', source_frame, rclpy.time.Time(), timeout=Duration(seconds=0.05)
+                )
+            except tf2_ros.TransformException as ex:
+                self.get_logger().warn(f'Face recognition TF failed: {ex}')
+                return None
+
+        x, y, _ = self._transform_point(
+            marker_msg.pose.position.x,
+            marker_msg.pose.position.y,
+            marker_msg.pose.position.z,
+            transform,
+        )
+        return x, y
+
+    @staticmethod
+    def _transform_point(x, y, z, transform):
+        t = transform.transform.translation
+        q = transform.transform.rotation
+        rotation = FaceRecognizer._quat_to_rotation_matrix(q.x, q.y, q.z, q.w)
+        rx = rotation[0][0] * x + rotation[0][1] * y + rotation[0][2] * z
+        ry = rotation[1][0] * x + rotation[1][1] * y + rotation[1][2] * z
+        rz = rotation[2][0] * x + rotation[2][1] * y + rotation[2][2] * z
+        return rx + t.x, ry + t.y, rz + t.z
+
+    @staticmethod
+    def _quat_to_rotation_matrix(qx, qy, qz, qw):
+        return [
+            [1 - 2 * (qy**2 + qz**2), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx**2 + qz**2), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx**2 + qy**2)],
+        ]
 
 
 def main():

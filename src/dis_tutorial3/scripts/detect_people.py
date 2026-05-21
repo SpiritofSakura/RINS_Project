@@ -82,23 +82,24 @@ class detect_faces(Node):
 
 				bbox = bbox[0]
 
-				# draw rectangle
-				cv_image = cv2.rectangle(cv_image, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), self.detection_color, 3)
+				cv_image = cv2.rectangle(
+					cv_image,
+					(int(bbox[0]), int(bbox[1])),
+					(int(bbox[2]), int(bbox[3])),
+					self.detection_color,
+					3
+				)
 
 				cx = int((bbox[0]+bbox[2])/2)
 				cy = int((bbox[1]+bbox[3])/2)
 
-				# draw the center of bounding box
-				cv_image = cv2.circle(cv_image, (cx,cy), 5, self.detection_color, -1)
+				cv_image = cv2.circle(cv_image, (cx, cy), 5, self.detection_color, -1)
 
-				self.faces.append((cx,cy))
+				self.faces.append((cx, cy, [int(v) for v in bbox]))
 
-			cv2.imshow("image", cv_image)
-			key = cv2.waitKey(1)
-			if key==27:
-				print("exiting")
-				exit()
-			
+			cv2.imshow("Face Camera", cv_image)
+			cv2.waitKey(1)
+
 		except CvBridgeError as e:
 			print(e)
 
@@ -111,26 +112,27 @@ class detect_faces(Node):
 		if self.robot_state not in ['IDLE', 'PATROL']:
 			return
 
-		# get point cloud attributes
 		height = data.height
 		width = data.width
-		point_step = data.point_step
-		row_step = data.row_step		
+
+		try:
+			points = pc2.read_points_numpy(data, field_names=("x", "y", "z"))
+			points = points.reshape((height, width, 3))
+		except Exception as e:
+			self.get_logger().warn(f"Could not read point cloud for people markers: {e}")
+			return
 
 		# iterate over face coordinates
-		for x,y in self.faces:
+		for x, y, bbox in self.faces:
 
-			# get 3-channel representation of the poitn cloud in numpy format
-			a = pc2.read_points_numpy(data, field_names= ("x", "y", "z"))
-			a = a.reshape((height,width,3))
-
-			# read center coordinates
-			d = a[y,x,:]
+			d = self._robust_person_point(points, x, y, bbox)
+			if d is None:
+				continue
 
 			# create marker
 			marker = Marker()
 
-			marker.header.frame_id = "/base_link"
+			marker.header.frame_id = data.header.frame_id
 			marker.header.stamp = data.header.stamp
 
 			marker.type = 2
@@ -154,6 +156,34 @@ class detect_faces(Node):
 			marker.pose.position.z = float(d[2])
 
 			self.marker_pub.publish(marker)
+
+	def _robust_person_point(self, points, cx, cy, bbox):
+		"""Return a median point from the central torso patch instead of one noisy pixel."""
+		height, width = points.shape[:2]
+		x1, y1, x2, y2 = bbox
+
+		box_w = max(1, x2 - x1)
+		box_h = max(1, y2 - y1)
+		roi_w = max(8, int(box_w * 0.25))
+		roi_h = max(8, int(box_h * 0.25))
+
+		# Person detections are full-body boxes. The torso is usually more stable
+		# than the face or legs for point-cloud localization.
+		torso_y = int(y1 + box_h * 0.45)
+		rx1 = max(0, cx - roi_w // 2)
+		rx2 = min(width, cx + roi_w // 2)
+		ry1 = max(0, torso_y - roi_h // 2)
+		ry2 = min(height, torso_y + roi_h // 2)
+
+		patch = points[ry1:ry2, rx1:rx2].reshape(-1, 3)
+		valid = patch[np.all(np.isfinite(patch), axis=1)]
+		if len(valid) == 0:
+			center = points[max(0, min(cy, height - 1)), max(0, min(cx, width - 1)), :]
+			if np.all(np.isfinite(center)):
+				return center
+			return None
+
+		return np.median(valid, axis=0)
 
 def main():
 	print('Face detection node starting.')

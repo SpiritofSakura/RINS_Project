@@ -1,3 +1,82 @@
 {
-  "barrels": []
+  "barrels": [
+    {
+      "id": 1,
+      "colour": "black",
+      "orientation": "vertical",
+      "leak_detected": false,
+      "position_map": [
+        1.481,
+        -1.276
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_1_192059.jpg",
+      "confirmed_at": "2026-05-21 19:20:59"
+    },
+    {
+      "id": 2,
+      "colour": "red",
+      "orientation": "horizontal",
+      "leak_detected": true,
+      "position_map": [
+        1.499,
+        -1.966
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_2_192104.jpg",
+      "confirmed_at": "2026-05-21 19:21:04",
+      "spill_detected": true,
+      "spill_pixel_count": 11497
+    },
+    {
+      "id": 3,
+      "colour": "red",
+      "orientation": "horizontal",
+      "leak_detected": false,
+      "position_map": [
+        1.427,
+        -3.127
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_3_192114.jpg",
+      "confirmed_at": "2026-05-21 19:21:14",
+      "spill_detected": false,
+      "spill_pixel_count": 0
+    },
+    {
+      "id": 4,
+      "colour": "red",
+      "orientation": "horizontal",
+      "leak_detected": true,
+      "position_map": [
+        1.558,
+        -1.043
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_4_192118.jpg",
+      "confirmed_at": "2026-05-21 19:21:18",
+      "spill_detected": true,
+      "spill_pixel_count": 683
+    },
+    {
+      "id": 5,
+      "colour": "blue",
+      "orientation": "vertical",
+      "leak_detected": false,
+      "position_map": [
+        -0.473,
+        -2.616
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_5_192220.jpg",
+      "confirmed_at": "2026-05-21 19:22:20"
+    },
+    {
+      "id": 6,
+      "colour": "blue",
+      "orientation": "vertical",
+      "leak_detected": false,
+      "position_map": [
+        -0.694,
+        -1.453
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_6_192243.jpg",
+      "confirmed_at": "2026-05-21 19:22:43"
+    }
+  ]
 }

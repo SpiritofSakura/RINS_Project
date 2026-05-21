@@ -2,8 +2,13 @@
 
 set -e
 
+REPO_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
 source /opt/ros/jazzy/setup.bash
-# source ~/ROS/project/RINS_Project/install/setup.bash
+source "$REPO_DIR/install/setup.bash"
+
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export IGN_IP=127.0.0.1
 
 ukaz="$1"
 

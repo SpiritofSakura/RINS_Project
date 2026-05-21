@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import math
+import json
 import random
 import shutil
 import subprocess
@@ -36,13 +37,19 @@ class BehaviorManager(Node):
         self.active_target = None
         self.handled_targets = []
         self.target_match_threshold = 0.6
+        self.barrel_match_threshold = 0.65
+        self.pending_match_threshold = {
+            'face': 0.35,
+            'ring': 0.35,
+            'barrel': 0.65,
+        }
+        self.approach_offset = 0.4
 
         # Queue for pending detections (captured before AMCL is ready)
         self.pending_targets = []  # List of {type, x, y, z, color}
         self.amcl_pose_ready = False
 
         self.latest_robot_pose = None
-        self.saved_patrol_pose = None
 
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.nav_server_ready = False
@@ -84,13 +91,11 @@ class BehaviorManager(Node):
             "This appears to be a {color} ring. Impressive.",
         ]
 
-        self.cylinder_lines = [
-            "I found a {color} cylinder. How cylindrical.",
-            "Behold. A {color} cylinder.",
-            "This cylinder is {color}. Notable.",
-            "A {color} cylinder has been detected.",
-            "I found a {color} cylinder. Very geometric.",
-            "A {color} cylinder. Structurally sound.",
+        self.barrel_lines = [
+            "I found a {color} {orientation} barrel. {leak_sentence}",
+            "Barrel inspection complete. The barrel is {color} and {orientation}. {leak_sentence}",
+            "This is a {color} {orientation} barrel. {leak_sentence}",
+            "A {color} barrel has been detected. It is {orientation}. {leak_sentence}",
         ]
 
         qos_latched = QoSProfile(
@@ -162,6 +167,9 @@ class BehaviorManager(Node):
         self.spill_done_subscriber = self.create_subscription(
             Empty, '/spill_check_done', self._spill_done_cb, 10
         )
+        self.barrel_result_subscriber = self.create_subscription(
+            String, '/barrel_inspection_result', self._barrel_result_cb, 10
+        )
 
         self.amcl_pose_subscriber = self.create_subscription(
             PoseWithCovarianceStamped,
@@ -202,31 +210,29 @@ class BehaviorManager(Node):
             self.amcl_pose_ready = True
             self.get_logger().info('AMCL pose is now ready. Processing pending detections.')
 
-    def save_current_pose(self):
-        if self.latest_robot_pose is None:
-            self.get_logger().warn('Robot pose not available yet from /amcl_pose.')
-            return False
-
-        self.saved_patrol_pose = PoseStamped()
-        self.saved_patrol_pose.header.frame_id = 'map'
-        self.saved_patrol_pose.header.stamp = self.get_clock().now().to_msg()
-        self.saved_patrol_pose.pose = self.latest_robot_pose
-        return True
-
     def speak_text(self, text):
         self.get_logger().info(f'SPEAK: {text}')
 
-        try:
-            if shutil.which('spd-say') is not None:
-                subprocess.run(['spd-say', '--wait', text], check=False)
-                return
+        commands = []
+        if shutil.which('espeak-ng') is not None:
+            commands.append(['espeak-ng', '-a', '180', '-s', '145', text])
+        if shutil.which('espeak') is not None:
+            commands.append(['espeak', '-a', '180', '-s', '145', text])
+        if shutil.which('spd-say') is not None:
+            commands.append(['spd-say', text])
 
-            if shutil.which('espeak') is not None:
-                subprocess.run(['espeak', text], check=False)
+        for command in commands:
+            try:
+                subprocess.Popen(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
                 return
+            except Exception as exc:
+                self.get_logger().warn(f'Speech command failed ({command[0]}): {exc}')
 
-        except Exception as exc:
-            self.get_logger().warn(f'Speech failed: {exc}')
+        self.get_logger().warn('No speech command found. Install espeak-ng or espeak.')
 
     def marker_to_ring_color(self, marker: Marker):
         red = round(marker.color.r, 2)
@@ -239,6 +245,8 @@ class BehaviorManager(Node):
             (0.0, 0.4, 1.0): 'blue',
             (1.0, 1.0, 0.0): 'yellow',
             (1.0, 0.5, 0.0): 'orange',
+            (0.6, 0.0, 1.0): 'purple',
+            (0.45, 0.22, 0.08): 'brown',
             (0.1, 0.1, 0.1): 'black',
         }
 
@@ -260,13 +268,46 @@ class BehaviorManager(Node):
         template = random.choice(self.ring_lines)
         return template.format(color=color)
 
-    def random_cylinder_line(self, color):
-        template = random.choice(self.cylinder_lines)
-        return template.format(color=color)
+    def random_barrel_line(self, color, orientation, leak_detected):
+        template = random.choice(self.barrel_lines)
+        if leak_detected is True:
+            leak_sentence = "Warning. It is leaking."
+        elif leak_detected is False:
+            leak_sentence = "No leak detected."
+        else:
+            leak_sentence = "Leak inspection was inconclusive."
+        return template.format(
+            color=color,
+            orientation=orientation,
+            leak_sentence=leak_sentence,
+        )
 
     def start_interaction(self):
         self.interaction_active = True
         self.interaction_end_time = self.get_clock().now().nanoseconds + int(self.interaction_duration * 1e9)
+        text = self.interaction_text()
+        if text:
+            self.speak_text(text)
+
+    def interaction_text(self):
+        if self.current_state == 'INTERACT_FACE':
+            return self.random_face_line()
+
+        if self.current_state == 'INTERACT_RING':
+            if self.active_target is not None and 'color' in self.active_target:
+                return self.random_ring_line(self.active_target['color'])
+            return 'I found a ring. Quite mysterious.'
+
+        if self.current_state == 'INTERACT_BARREL':
+            if self.active_target is None:
+                return 'I found a barrel. Inspection complete.'
+            return self.random_barrel_line(
+                self.active_target.get('color', 'unknown'),
+                self.active_target.get('orientation', 'unknown'),
+                self.active_target.get('leak_detected'),
+            )
+
+        return None
 
     def finish_interaction(self):
         self.interaction_active = False
@@ -277,47 +318,57 @@ class BehaviorManager(Node):
 
     def _spill_done_cb(self, _msg: Empty):
         if self.waiting_for_spill_check:
-            self.get_logger().info('Spill check done — finishing cylinder interaction.')
-            self.finish_interaction()
+            self.get_logger().info('Spill check done — starting barrel interaction.')
+            self.waiting_for_spill_check = False
+            self.spill_check_start_time = None
+            self.start_interaction()
+
+    def _barrel_result_cb(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warn(f'Invalid barrel inspection result: {msg.data}')
+            return
+
+        if self.active_target is None or self.active_target.get('type') != 'barrel':
+            return
+
+        barrel_id = data.get('barrel_id')
+        if barrel_id is not None and self.active_target.get('barrel_id') not in (None, barrel_id):
+            return
+
+        self.active_target['leak_detected'] = data.get('leak_detected')
+        self.active_target['spill_pixel_count'] = data.get('spill_pixel_count', 0)
 
     def main_loop(self):
-        # Process any pending detections that were queued before AMCL was ready
-        if self.amcl_pose_ready and self.pending_targets and self.active_target is None:
-            target = self.pending_targets.pop(0)
-            
-            # Double-check that this target hasn't already been handled since it was queued
-            if self.is_already_handled(target['type'], target['x'], target['y']):
-                self.get_logger().info(f"Queued {target['type']} detection already handled, skipping.")
-            else:
-                self.get_logger().info(f'Processing queued {target["type"]} detection (x={target["x"]:.2f}, y={target["y"]:.2f})')
-                if target['color'] is not None:
-                    self.activate_target(target['type'], target['x'], target['y'], target['z'], target['color'])
-                else:
-                    self.activate_target(target['type'], target['x'], target['y'], target['z'])
-
         if not self.nav_server_ready:
             if self.nav_client.wait_for_server(timeout_sec=0.01):
                 self.nav_server_ready = True
                 self.get_logger().info('Behavior manager connected to navigate_to_pose.')
             return
 
+        # Process pending detections only after navigation is ready. Confirmed markers
+        # may be one-shot publications, so never pop them before they can become goals.
+        if self.amcl_pose_ready and self.pending_targets and self.active_target is None:
+            target = self.pending_targets[0]
+
+            if self.is_already_handled(target['type'], target['x'], target['y'], target.get('color')):
+                self.pending_targets.pop(0)
+                self.get_logger().info(f"Queued {target['type']} detection already handled, skipping.")
+            else:
+                self.get_logger().info(f'Processing queued {target["type"]} detection (x={target["x"]:.2f}, y={target["y"]:.2f})')
+                metadata = {
+                    key: value for key, value in target.items()
+                    if key not in ('type', 'x', 'y', 'z', 'color')
+                }
+                if self.activate_target(
+                    target['type'], target['x'], target['y'], target['z'],
+                    target.get('color'), **metadata
+                ):
+                    self.pending_targets.pop(0)
+
         if self.interaction_active and self.interaction_end_time is not None:
             if self.get_clock().now().nanoseconds >= self.interaction_end_time:
-                if self.current_state == 'INTERACT_FACE':
-                    self.speak_text(self.random_face_line())
-
-                elif self.current_state == 'INTERACT_RING':
-                    if self.active_target is not None and 'color' in self.active_target:
-                        self.speak_text(self.random_ring_line(self.active_target['color']))
-                    else:
-                        self.speak_text('I found a ring. Quite mysterious.')
-
-                elif self.current_state == 'INTERACT_CYLINDER':
-                    if self.active_target is not None and 'color' in self.active_target:
-                        self.speak_text(self.random_cylinder_line(self.active_target['color']))
-                    else:
-                        self.speak_text('I found a cylinder. Remarkable.')
-
                 self.finish_interaction()
             return
 
@@ -326,14 +377,18 @@ class BehaviorManager(Node):
             if self.spill_check_start_time is not None:
                 elapsed = (self.get_clock().now().nanoseconds - self.spill_check_start_time) / 1e9
                 if elapsed >= self.spill_check_timeout:
-                    self.get_logger().warn('Spill check timed out — finishing interaction anyway.')
-                    self.finish_interaction()
+                    self.get_logger().warn('Spill check timed out — speaking inconclusive result.')
+                    self.waiting_for_spill_check = False
+                    self.spill_check_start_time = None
+                    if self.active_target is not None:
+                        self.active_target['leak_detected'] = None
+                    self.start_interaction()
             return
 
         # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
         # This is a FAILSAFE that cancels the stuck nav goal and forces interaction to start
         if self.approach_start_time is not None and self.active_target is not None:
-            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING', 'APPROACH_CYLINDER') and self.nav_goal_type in ('approach_face', 'approach_ring', 'approach_cylinder'):
+            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING', 'APPROACH_BARREL') and self.nav_goal_type in ('approach_face', 'approach_ring', 'approach_barrel'):
                 elapsed = (self.get_clock().now().nanoseconds - self.approach_start_time) / 1e9
                 if elapsed >= self.approach_timeout:
                     self.get_logger().warn(
@@ -344,11 +399,11 @@ class BehaviorManager(Node):
                     # Gracefully transition to interact - use same interaction flow as normal
                     if self.current_state == 'APPROACH_FACE':
                         self.publish_state('INTERACT_FACE')
-                    elif self.current_state == 'APPROACH_CYLINDER':
-                        self.publish_state('INTERACT_CYLINDER')
+                    elif self.current_state == 'APPROACH_BARREL':
+                        self.publish_state('INTERACT_BARREL')
                     else:  # APPROACH_RING
                         self.publish_state('INTERACT_RING')
-                    if self.current_state == 'INTERACT_CYLINDER' and self.active_target is not None and self.active_target.get('is_horizontal', False):
+                    if self.current_state == 'INTERACT_BARREL' and self.active_target is not None and self.active_target.get('is_horizontal', False):
                         self.get_logger().info('Horizontal barrel (timeout path) — waiting for spill check.')
                         self.waiting_for_spill_check = True
                         self.spill_check_start_time = self.get_clock().now().nanoseconds
@@ -389,9 +444,9 @@ class BehaviorManager(Node):
                 self.get_logger().info('Reached ring target. Starting interaction.')
                 self.start_interaction()
 
-            elif nav_goal_type == 'approach_cylinder':
-                self.publish_state('INTERACT_CYLINDER')
-                self.get_logger().info('Reached cylinder target. Starting interaction.')
+            elif nav_goal_type == 'approach_barrel':
+                self.publish_state('INTERACT_BARREL')
+                self.get_logger().info('Reached barrel target. Starting interaction.')
                 if self.active_target is not None and self.active_target.get('is_horizontal', False):
                     self.get_logger().info('Horizontal barrel — waiting for spill check.')
                     self.waiting_for_spill_check = True
@@ -399,12 +454,6 @@ class BehaviorManager(Node):
                     self.start_spill_pub.publish(Empty())
                 else:
                     self.start_interaction()
-
-            elif nav_goal_type == 'return_to_patrol':
-                self.get_logger().info('Returned to saved patrol pose.')
-                self.active_target = None
-                self.saved_patrol_pose = None
-                self.refresh_state()
 
             else:
                 self.get_logger().info('Temporary navigation goal succeeded.')
@@ -420,13 +469,95 @@ class BehaviorManager(Node):
             self.get_logger().warn(f'Temporary navigation failed: {nav_goal_type}, status={status}')
             self.refresh_state()
 
-    def is_already_handled(self, target_type, x, y):
+    def colors_compatible(self, color_a, color_b):
+        if color_a in (None, 'unknown') or color_b in (None, 'unknown'):
+            return True
+        return color_a == color_b
+
+    def is_barrel_duplicate(self, existing, x, y, color):
+        distance = self.distance(x, y, existing['x'], existing['y'])
+        if distance <= 0.18:
+            return True
+        return (
+            distance <= self.barrel_match_threshold
+            and self.colors_compatible(existing.get('color'), color)
+        )
+
+    def is_already_handled(self, target_type, x, y, color=None):
+        threshold = self.match_threshold_for_type(target_type)
         for target in self.handled_targets:
             if target['type'] != target_type:
                 continue
-            if self.distance(x, y, target['x'], target['y']) <= self.target_match_threshold:
+            if target_type in ('barrel', 'cylinder'):
+                if self.is_barrel_duplicate(target, x, y, color):
+                    return True
+                continue
+            if self.distance(x, y, target['x'], target['y']) <= threshold:
                 return True
         return False
+
+    def match_threshold_for_type(self, target_type):
+        if target_type in ('barrel', 'cylinder'):
+            return self.barrel_match_threshold
+        return self.target_match_threshold
+
+    def pending_threshold_for_type(self, target_type):
+        return self.pending_match_threshold.get(target_type, 0.35)
+
+    def accepts_new_detections(self):
+        return self.current_state in (
+            'PATROL',
+            'IDLE',
+            'APPROACH_FACE',
+            'INTERACT_FACE',
+            'APPROACH_RING',
+            'INTERACT_RING',
+            'APPROACH_BARREL',
+            'INTERACT_BARREL',
+        )
+
+    def is_active_target_match(self, target_type, x, y, color=None):
+        if self.active_target is None:
+            return False
+        if self.active_target.get('type') != target_type:
+            return False
+        if target_type in ('barrel', 'cylinder'):
+            return self.is_barrel_duplicate(self.active_target, x, y, color)
+        threshold = self.match_threshold_for_type(target_type)
+        return self.distance(x, y, self.active_target['x'], self.active_target['y']) <= threshold
+
+    def is_pending_target_match(self, target_type, x, y, color=None):
+        threshold = self.pending_threshold_for_type(target_type)
+        for target in self.pending_targets:
+            if target.get('type') != target_type:
+                continue
+            if target_type in ('barrel', 'cylinder'):
+                if self.is_barrel_duplicate(target, x, y, color):
+                    return True
+                continue
+            if self.distance(x, y, target['x'], target['y']) <= threshold:
+                return True
+        return False
+
+    def queue_target(self, target):
+        target_type = target['type']
+        x = target['x']
+        y = target['y']
+        color = target.get('color')
+
+        if self.is_already_handled(target_type, x, y, color):
+            return False
+        if self.is_active_target_match(target_type, x, y, color):
+            return False
+        if self.is_pending_target_match(target_type, x, y, color):
+            return False
+
+        self.pending_targets.append(target)
+        self.get_logger().info(
+            f"Queued {target_type} target at x={x:.2f}, y={y:.2f} "
+            f"(queue={len(self.pending_targets)})"
+        )
+        return True
 
     def compute_approach_point(self, target_x, target_y):
         if self.latest_robot_pose is None:
@@ -442,7 +573,7 @@ class BehaviorManager(Node):
         if dist < 0.05:
             return None
 
-        offset = 1.5
+        offset = self.approach_offset
         if dist <= offset:
             goal_x = robot_x
             goal_y = robot_y
@@ -533,11 +664,6 @@ class BehaviorManager(Node):
             return
 
         if self.active_target is not None:
-            if self.nav_goal_type == 'return_to_patrol' or self.current_state == 'RETURN_TO_PATROL':
-                self.publish_patrol_enabled(False)
-                self.publish_state('RETURN_TO_PATROL', force_publish)
-                return
-
             if self.nav_goal_type == 'approach_face' or self.current_state == 'INTERACT_FACE':
                 self.publish_patrol_enabled(False)
                 if self.current_state == 'INTERACT_FACE':
@@ -554,12 +680,12 @@ class BehaviorManager(Node):
                     self.publish_state('APPROACH_RING', force_publish)
                 return
 
-            if self.nav_goal_type == 'approach_cylinder' or self.current_state == 'INTERACT_CYLINDER':
+            if self.nav_goal_type == 'approach_barrel' or self.current_state == 'INTERACT_BARREL':
                 self.publish_patrol_enabled(False)
-                if self.current_state == 'INTERACT_CYLINDER':
-                    self.publish_state('INTERACT_CYLINDER', force_publish)
+                if self.current_state == 'INTERACT_BARREL':
+                    self.publish_state('INTERACT_BARREL', force_publish)
                 else:
-                    self.publish_state('APPROACH_CYLINDER', force_publish)
+                    self.publish_state('APPROACH_BARREL', force_publish)
                 return
 
             if self.active_target['type'] == 'face':
@@ -572,9 +698,9 @@ class BehaviorManager(Node):
                 self.publish_state('APPROACH_RING', force_publish)
                 return
 
-            if self.active_target['type'] == 'cylinder':
+            if self.active_target['type'] == 'barrel':
                 self.publish_patrol_enabled(False)
-                self.publish_state('APPROACH_CYLINDER', force_publish)
+                self.publish_state('APPROACH_BARREL', force_publish)
                 return
 
         if self.patrol_requested and not self.patrol_finished:
@@ -585,21 +711,18 @@ class BehaviorManager(Node):
         self.publish_patrol_enabled(False)
         self.publish_state('IDLE', force_publish)
 
-    def activate_target(self, target_type, x, y, z, color=None):
+    def activate_target(self, target_type, x, y, z, color=None, **metadata):
         if self.active_target is not None:
-            return
+            return False
 
         if self.latest_robot_pose is None:
             self.get_logger().warn('Ignoring target because /amcl_pose is not available yet.')
-            return
-
-        if not self.save_current_pose():
-            return
+            return False
 
         approach = self.compute_approach_point(x, y)
         if approach is None:
             self.get_logger().warn('Could not compute an approach goal.')
-            return
+            return False
 
         self.active_target = {
             'type': target_type,
@@ -607,6 +730,7 @@ class BehaviorManager(Node):
             'y': y,
             'z': z,
         }
+        self.active_target.update(metadata)
 
         if color is not None:
             self.active_target['color'] = color
@@ -618,91 +742,84 @@ class BehaviorManager(Node):
         self.publish_patrol_enabled(False)
 
         goal_x, goal_y, goal_yaw = approach
-        nav_goal_type = {'face': 'approach_face', 'ring': 'approach_ring', 'cylinder': 'approach_cylinder'}.get(target_type, 'approach_ring')
+        nav_goal_type = {
+            'face': 'approach_face',
+            'ring': 'approach_ring',
+            'barrel': 'approach_barrel',
+            'cylinder': 'approach_barrel',
+        }.get(target_type, 'approach_ring')
 
         if not self.send_nav_goal(goal_x, goal_y, goal_yaw, nav_goal_type):
             self.active_target = None
-            self.saved_patrol_pose = None
             self.refresh_state()
-            return
+            return False
 
         # Start approach timeout: auto-transition to interact after 15 seconds (fresh timer for this approach)
         self.approach_start_time = self.get_clock().now().nanoseconds
 
         self.refresh_state()
+        return True
 
     def face_callback(self, msg: Marker):
-        if self.current_state not in ('PATROL', 'IDLE'):
+        if not self.accepts_new_detections():
             return
 
-        if self.active_target is not None:
+        if msg.ns and msg.ns != 'face_confirmed':
             return
 
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
 
-        if self.is_already_handled('face', x, y):
-            return
-
-        # Check if already in queue at same position (deduplication)
-        if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'face' for t in self.pending_targets):
-            return
-
-        # Queue the detection; it will be processed in main_loop when AMCL is ready
-        self.pending_targets.append({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None})
+        self.queue_target({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None})
 
     def ring_callback(self, msg: Marker):
-        if self.current_state not in ('PATROL', 'IDLE'):
+        if not self.accepts_new_detections():
             return
 
-        if self.active_target is not None:
+        if msg.ns and msg.ns not in ('ring_confirmed', 'ring_actionable'):
             return
 
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
-
-        if self.is_already_handled('ring', x, y):
-            return
 
         color = self.marker_to_ring_color(msg)
-        
-        # Check if already in queue at same position (deduplication)
-        if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'ring' for t in self.pending_targets):
-            return
-        
-        # Queue the detection; it will be processed in main_loop when AMCL is ready
-        self.pending_targets.append({'type': 'ring', 'x': x, 'y': y, 'z': z, 'color': color})
+        self.queue_target({'type': 'ring', 'x': x, 'y': y, 'z': z, 'color': color})
 
     def cylinder_callback(self, msg: Marker):
-        if self.current_state not in ('PATROL', 'IDLE'):
+        if not self.accepts_new_detections():
             return
 
-        if self.active_target is not None:
+        if msg.ns and msg.ns not in ('barrel_confirmed', 'cylinder_confirmed'):
             return
 
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
-
-        if self.is_already_handled('cylinder', x, y):
-            return
 
         color = self.marker_to_ring_color(msg)
         is_horizontal = (msg.text == 'horizontal')
+        orientation = 'horizontal' if is_horizontal else 'vertical'
 
-        if any(abs(t['x'] - x) < 0.3 and abs(t['y'] - y) < 0.3 and t['type'] == 'cylinder' for t in self.pending_targets):
-            return
-
-        self.pending_targets.append({'type': 'cylinder', 'x': x, 'y': y, 'z': z, 'color': color, 'is_horizontal': is_horizontal})
+        self.queue_target({
+            'type': 'barrel',
+            'x': x,
+            'y': y,
+            'z': z,
+            'color': color,
+            'is_horizontal': is_horizontal,
+            'orientation': orientation,
+            'barrel_id': msg.id,
+            'leak_detected': False if not is_horizontal else None,
+        })
 
     def target_done_callback(self, msg: Empty):
         if self.active_target is None:
             self.get_logger().info('No active target to mark as done.')
             return
 
-        if self.current_state not in ('INTERACT_FACE', 'INTERACT_RING', 'INTERACT_CYLINDER', 'APPROACH_FACE', 'APPROACH_RING', 'APPROACH_CYLINDER'):
+        if self.current_state not in ('INTERACT_FACE', 'INTERACT_RING', 'INTERACT_BARREL', 'APPROACH_FACE', 'APPROACH_RING', 'APPROACH_BARREL'):
             self.get_logger().info('Target done received, but current state is not target handling.')
             return
 
@@ -713,29 +830,11 @@ class BehaviorManager(Node):
             f"x={self.active_target['x']:.2f}, y={self.active_target['y']:.2f}"
         )
 
-        if self.saved_patrol_pose is None:
-            self.get_logger().warn('No saved patrol pose. Clearing target without return.')
-            self.active_target = None
-            self.refresh_state()
-            return
-
-        x = self.saved_patrol_pose.pose.position.x
-        y = self.saved_patrol_pose.pose.position.y
-        yaw = 2.0 * math.atan2(
-            self.saved_patrol_pose.pose.orientation.z,
-            self.saved_patrol_pose.pose.orientation.w
-        )
-
         if self.goal_active:
             self.cancel_temporary_goal()
 
-        if self.send_nav_goal(x, y, yaw, 'return_to_patrol'):
-            self.publish_state('RETURN_TO_PATROL')
-        else:
-            self.get_logger().warn('Could not start return-to-patrol navigation.')
-            self.active_target = None
-            self.saved_patrol_pose = None
-            self.refresh_state()
+        self.active_target = None
+        self.refresh_state()
 
     def resume_patrol_callback(self, msg: Empty):
         if self.active_target is not None:
@@ -749,7 +848,6 @@ class BehaviorManager(Node):
         self.interaction_active = False
         self.interaction_end_time = None
         self.active_target = None
-        self.saved_patrol_pose = None
         self.refresh_state()
 
     def manual_control_callback(self, msg: Bool):

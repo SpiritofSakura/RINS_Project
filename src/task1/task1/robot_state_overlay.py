@@ -14,7 +14,8 @@ DOVOLJENA_STANJA = {
     'INTERACT_FACE',
     'APPROACH_RING',
     'INTERACT_RING',
-    'RETURN_TO_PATROL',
+    'APPROACH_BARREL',
+    'INTERACT_BARREL',
 }
 
 
@@ -98,10 +99,10 @@ class RobotStateOverlay(Node):
             bar.a = 1.0
             return bar
 
-        if self.trenutno_stanje == 'RETURN_TO_PATROL':
-            bar.r = 0.4
-            bar.g = 0.8
-            bar.b = 1.0
+        if self.trenutno_stanje in {'APPROACH_BARREL', 'INTERACT_BARREL'}:
+            bar.r = 1.0
+            bar.g = 0.55
+            bar.b = 0.2
             bar.a = 1.0
             return bar
 
