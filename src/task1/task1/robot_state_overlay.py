@@ -16,6 +16,15 @@ DOVOLJENA_STANJA = {
     'INTERACT_RING',
     'APPROACH_BARREL',
     'INTERACT_BARREL',
+    'INSPECTOR_INACTIVE',
+    'LOAD_YAML',
+    'NAV_TO_WS',
+    'FINE_POSITION',
+    'EXTEND_ARM',
+    'SCAN_TILE',
+    'TILE_FOUND',
+    'MOVE_NEXT',
+    'FINISHED',
 }
 
 
@@ -103,6 +112,69 @@ class RobotStateOverlay(Node):
             bar.r = 1.0
             bar.g = 0.55
             bar.b = 0.2
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'INSPECTOR_INACTIVE':
+            bar.r = 0.4
+            bar.g = 0.4
+            bar.b = 0.5
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'LOAD_YAML':
+            bar.r = 0.0
+            bar.g = 0.8
+            bar.b = 0.8
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'NAV_TO_WS':
+            bar.r = 1.0
+            bar.g = 1.0
+            bar.b = 1.0
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'FINE_POSITION':
+            bar.r = 0.3
+            bar.g = 0.6
+            bar.b = 1.0
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'EXTEND_ARM':
+            bar.r = 0.8
+            bar.g = 0.3
+            bar.b = 1.0
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'SCAN_TILE':
+            bar.r = 0.6
+            bar.g = 1.0
+            bar.b = 0.3
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'TILE_FOUND':
+            bar.r = 0.0
+            bar.g = 1.0
+            bar.b = 0.0
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'MOVE_NEXT':
+            bar.r = 1.0
+            bar.g = 0.7
+            bar.b = 0.0
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje == 'FINISHED':
+            bar.r = 0.0
+            bar.g = 1.0
+            bar.b = 0.5
             bar.a = 1.0
             return bar
 

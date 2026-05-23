@@ -39,6 +39,11 @@ setup(
             'color_mask_viewer = task1.color_mask_viewer:main',
             'line_localizator = task1.line_localizator:main',
             'workstation_recorder = task1.workstation_recorder:main',
+            'station_inspector = task1.station_inspector:main',
+            'parallel_align = task1.parallel_align:main',
+            'tile_detect = task1.tile_detect:main',
+            'arm_camera_viewer = task1.arm_camera_viewer:main',
+            'oakd_camera_viewer = task1.oakd_camera_viewer:main',
         ],
     },
 )

@@ -264,7 +264,7 @@ class LineLocalizator(Node):
 
                     self._publish_line_marker(p1, p2, color, data.header.stamp)
 
-                    self.get_logger().info(
+                    self.get_logger().debug(
                         f"{color} segment @ ({p1[0]:.2f}, {p1[1]:.2f}, {p1[2]:.2f})"
                         f" → ({p2[0]:.2f}, {p2[1]:.2f}, {p2[2]:.2f})"
                     )

@@ -1,13 +1,19 @@
+import sys
+import os
+import math
+
 import rclpy
 from rclpy.node import Node
 import numpy as np
+import yaml
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import PointStamped
 from builtin_interfaces.msg import Duration
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from tf2_geometry_msgs import do_transform_point
-import math
+
+from ament_index_python.packages import get_package_share_directory
 
 CONFIRM_COUNT = 10
 ROBOT_FRAMES = ["base_footprint", "base_link"]
@@ -31,13 +37,21 @@ class WorkstationRecorder(Node):
 
         self.red_candidates = []
         self.green_candidates = []
+        self.red_endpoints = []
+        self.green_endpoints = []
         self.red_locked = False
         self.green_locked = False
         self.red_markers = []
         self.green_markers = []
 
+        self.mode = "normal"
+        if "--mode" in sys.argv:
+            idx = sys.argv.index("--mode")
+            if idx + 1 < len(sys.argv):
+                self.mode = sys.argv[idx + 1]
+
         self.create_timer(2.0, self._republish)
-        self.get_logger().info("WorkstationRecorder ready.")
+        self.get_logger().info(f"WorkstationRecorder ready (mode={self.mode}).")
 
     def _get_robot_pos(self):
         for frame in ROBOT_FRAMES:
@@ -147,6 +161,10 @@ class WorkstationRecorder(Node):
         map_center = self._to_map(center, msg.header.frame_id, msg.header.stamp)
         if map_center is None:
             return
+        map_p1 = self._to_map(p1, msg.header.frame_id, msg.header.stamp)
+        map_p2 = self._to_map(p2, msg.header.frame_id, msg.header.stamp)
+        if map_p1 is None or map_p2 is None:
+            return
 
         dx = robot_xy[0] - map_center[0]
         dy = robot_xy[1] - map_center[1]
@@ -160,10 +178,12 @@ class WorkstationRecorder(Node):
             map_center[0] + stop_dist * nx,
             map_center[1] + stop_dist * ny,
         ])
-        yaw = math.atan2(dy, dx)
+        yaw = math.atan2(-dy, -dx)
 
         candidates = self.red_candidates if is_red else self.green_candidates
         candidates.append((marker_pos[0], marker_pos[1], yaw))
+        endpoints = self.red_endpoints if is_red else self.green_endpoints
+        endpoints.append((map_p1, map_p2))
 
         if len(candidates) < CONFIRM_COUNT:
             return
@@ -188,6 +208,54 @@ class WorkstationRecorder(Node):
             )
 
         self._republish()
+
+        if self.mode == "toYAML":
+            self._write_yaml()
+
+    def _write_yaml(self):
+        if not (self.red_locked or self.green_locked):
+            return
+
+        pkg_path = get_package_share_directory("task1")
+        yaml_path = os.path.join(pkg_path, "config", "test_workstation_locations.yaml")
+
+        data = {"workstations": {}}
+
+        for key, is_red, markers, ep_list in [
+            ("red", True, self.red_markers, self.red_endpoints),
+            ("green", False, self.green_markers, self.green_endpoints),
+        ]:
+            if not markers:
+                continue
+            m = markers[0]
+            yaw = 2.0 * math.atan2(m.pose.orientation.z, m.pose.orientation.w)
+
+            ep_arr = np.array(ep_list)
+            median_p1 = np.median(ep_arr[:, 0, :], axis=0)
+            median_p2 = np.median(ep_arr[:, 1, :], axis=0)
+
+            data["workstations"][key] = {
+                "approach": {
+                    "x": float(m.pose.position.x),
+                    "y": float(m.pose.position.y),
+                    "yaw": yaw,
+                },
+                "line_start": {
+                    "x": float(median_p1[0]),
+                    "y": float(median_p1[1]),
+                    "z": float(median_p1[2]),
+                },
+                "line_end": {
+                    "x": float(median_p2[0]),
+                    "y": float(median_p2[1]),
+                    "z": float(median_p2[2]),
+                },
+            }
+
+        os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
+        with open(yaml_path, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, default_flow_style=False, indent=2)
+        self.get_logger().info(f"Workstation locations written to {yaml_path}")
 
     def _republish(self):
         arr = MarkerArray()
