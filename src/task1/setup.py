@@ -36,6 +36,9 @@ setup(
             'face_recognizer = task1.face_recognizer:main',
             'cylinder_localizator = task1.cylinder_localizator:main',
             'cylinder_debug_view = task1.cylinder_debug_view:main',
+            'color_mask_viewer = task1.color_mask_viewer:main',
+            'line_localizator = task1.line_localizator:main',
+            'workstation_recorder = task1.workstation_recorder:main',
         ],
     },
 )
