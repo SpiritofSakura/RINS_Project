@@ -101,6 +101,13 @@ def generate_launch_description():
         actions=[cylinder_localizator_node],
     )
 
+    orchestrator_node = Node(
+        package='task1',
+        executable='orchestrator',
+        name='orchestrator',
+        output='screen',
+    )
+
     # Create launch description and add all nodes
     ld = LaunchDescription([
         detect_people_node,
@@ -113,6 +120,7 @@ def generate_launch_description():
         delayed_ring_localizator,
         delayed_cylinder_segmentation,
         delayed_cylinder_localizator,
+        orchestrator_node,
     ])
     
     return ld

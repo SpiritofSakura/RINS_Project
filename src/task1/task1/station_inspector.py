@@ -43,8 +43,10 @@ class StationInspector(Node):
         super().__init__("station_inspector")
         self.declare_parameter("workstation", "green")
         self.declare_parameter("use_yaml", True)
+        self.declare_parameter("use_orchestrator", False)
         self.ws_key = self.get_parameter("workstation").value
         self.use_yaml = self.get_parameter("use_yaml").value
+        self.use_orchestrator = self.get_parameter("use_orchestrator").value
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -85,6 +87,14 @@ class StationInspector(Node):
         self.tile_status_sub = self.create_subscription(
             String, "/tile_status", self._tile_status_callback, 10
         )
+        self._orch_sub = self.create_subscription(
+            PoseStamped, "/orchestrator_out", self._orchestrator_cb, 10
+        )
+        self._orch_in_pub = self.create_publisher(
+            String, "/orchestrator_in", 10
+        )
+        self._orch_requested = False
+        self._orch_received = False
         self._tile_process = None
         self._classifier_process = None
         self._phase5_sub = 0
@@ -255,6 +265,19 @@ class StationInspector(Node):
         elif msg.data == "TILE_LEFT":
             self._tile_found = False
 
+    def _orchestrator_cb(self, msg):
+        color = msg.header.frame_id
+        if color != self.ws_key:
+            return
+        qz, qw = msg.pose.orientation.z, msg.pose.orientation.w
+        yaw = 2.0 * math.atan2(qz, qw)
+        self.approach_pose = (msg.pose.position.x, msg.pose.position.y, yaw)
+        self._orch_received = True
+        self.get_logger().info(
+            f"Orchestrator gave {color} waypoint: "
+            f"({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f}), yaw={yaw:.2f}"
+        )
+
     def _check_workstation_color_bottom_left(self):
         if self.latest_oakd is None:
             return True
@@ -335,6 +358,20 @@ class StationInspector(Node):
             if self.use_yaml and self._load_yaml():
                 self._set_state("NAV_TO_WS")
                 self.nav_goal_sent = False
+                return
+            if self.use_orchestrator and self._orch_received:
+                self._orch_received = False
+                self._set_state("NAV_TO_WS")
+                self.nav_goal_sent = False
+                return
+            if self.use_orchestrator and not self._orch_requested:
+                cmd = String()
+                cmd.data = f"get_{self.ws_key}_waypoint"
+                self._orch_in_pub.publish(cmd)
+                self._orch_requested = True
+                self.get_logger().info(
+                    f"Requested {self.ws_key} waypoint from orchestrator"
+                )
             return
 
         if self.state == "NAV_TO_WS":

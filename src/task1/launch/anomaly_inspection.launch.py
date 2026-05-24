@@ -10,13 +10,27 @@ def generate_launch_description():
         default_value="green",
         description="Workstation to inspect: green or red",
     )
+    use_yaml_arg = DeclareLaunchArgument(
+        "use_yaml",
+        default_value="false",
+        description="Use YAML waypoints instead of orchestrator",
+    )
+    use_orchestrator_arg = DeclareLaunchArgument(
+        "use_orchestrator",
+        default_value="true",
+        description="Use orchestrator for waypoints",
+    )
 
     station_inspector_node = Node(
         package="task1",
         executable="station_inspector",
         name="station_inspector",
         output="screen",
-        parameters=[{"workstation": LaunchConfiguration("workstation")}],
+        parameters=[
+            {"workstation": LaunchConfiguration("workstation")},
+            {"use_yaml": LaunchConfiguration("use_yaml")},
+            {"use_orchestrator": LaunchConfiguration("use_orchestrator")},
+        ],
     )
 
     arm_camera_viewer_node = Node(
@@ -30,6 +44,20 @@ def generate_launch_description():
         package="task1",
         executable="line_localizator",
         name="line_localizator",
+        output="screen",
+    )
+
+    workstation_recorder_node = Node(
+        package="task1",
+        executable="workstation_recorder",
+        name="workstation_recorder",
+        output="screen",
+    )
+
+    orchestrator_node = Node(
+        package="task1",
+        executable="orchestrator",
+        name="orchestrator",
         output="screen",
     )
 
@@ -49,7 +77,11 @@ def generate_launch_description():
 
     ld = LaunchDescription([
         workstation_arg,
+        use_yaml_arg,
+        use_orchestrator_arg,
         line_localizator_node,
+        workstation_recorder_node,
+        orchestrator_node,
         station_inspector_node,
         arm_camera_viewer_node,
         oakd_viewer_node,

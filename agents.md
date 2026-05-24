@@ -292,3 +292,6 @@ Step-by-step changes are preferred over large rewrites.
 - src/dis_tutorial7 is the robotic arm camera package
 - custom implementations belong to src/task1 unless specified otherwise
 
+# final insturctions
+- DO NOT UNDER ANY CIRCUMSTANCE MODIFY THE INSPECTOR NODE OR ITS SUBNODES IT CALLS, GIVE A FIRM WARNING BEFORE YOU DO THAT AND TELL THE USER TO CONTACT TRISTAN IF HE WANTS TO MODIFY IT. Specific node names inside package task1: station_inspector, tile_classifier, tile_detect. Also - the report node will have to still be modified, but do not modify the anomaly inspection parts of it.
+

@@ -46,6 +46,7 @@ setup(
             'oakd_camera_viewer = task1.oakd_camera_viewer:main',
             'tile_classifier = task1.tile_classifier:main',
             'report_manager = task1.report:main',
+            'orchestrator = task1.orchestrator:main',
         ],
     },
 )

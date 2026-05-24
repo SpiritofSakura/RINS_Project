@@ -1,16 +1,29 @@
 #!/bin/bash
+REPO_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Usage: ./inspector.sh [green|red]
-# Reads an existing test_workstation_locations.yaml,
-# navigates to the workstation and inspects tiles.
+source /opt/ros/jazzy/setup.bash
+source "$REPO_DIR/install/setup.bash"
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export IGN_IP=127.0.0.1
 
-COLOR="${1:-green}"
+WS="red"
+USE_YAML="false"
+USE_ORCH="true"
 
-if [[ "$COLOR" != "green" && "$COLOR" != "red" ]]; then
-    echo "Usage: $0 [green|red]"
-    exit 1
-fi
+for arg in "$@"; do
+    case "$arg" in
+        red|green)
+            WS="$arg"
+            ;;
+        --yaml)
+            USE_YAML="true"
+            USE_ORCH="false"
+            ;;
+    esac
+done
 
-source /home/zeta/RINS_Project/install/setup.bash
-
-ros2 launch task1 test_inspector.launch.py workstation:="$COLOR"
+echo "Starting inspector — workstation=$WS use_yaml=$USE_YAML use_orchestrator=$USE_ORCH"
+ros2 launch task1 anomaly_inspection.launch.py \
+    workstation:="$WS" \
+    use_yaml:="$USE_YAML" \
+    use_orchestrator:="$USE_ORCH"
