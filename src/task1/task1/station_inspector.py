@@ -1,5 +1,8 @@
 import os
+import sys
 import math
+import subprocess
+import signal
 import cv2
 from pathlib import Path
 
@@ -11,7 +14,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist, TwistStamped, PointStamped, Point
 from visualization_msgs.msg import Marker
 from nav2_msgs.action import NavigateToPose
-from std_msgs.msg import String
+from std_msgs.msg import String, Int32
 from sensor_msgs.msg import Image, LaserScan
 from cv_bridge import CvBridge
 from tf2_geometry_msgs import do_transform_point
@@ -29,11 +32,9 @@ INSPECTOR_STATES = {
     "LOAD_YAML",
     "NAV_TO_WS",
     "FINE_POSITION",
-    "EXTEND_ARM",
-    "SCAN_TILE",
+    "SCAN_TILES",
     "TILE_FOUND",
-    "MOVE_NEXT",
-    "FINISHED",
+    "ESCAPING_WORKSTATION",
 }
 
 
@@ -77,12 +78,15 @@ class StationInspector(Node):
         )
         self.marker_pub = self.create_publisher(Marker, "/inspector/rear_cone", 10)
         self._tile_stop_start = None
-        self._tile_was_visible = False
-        self._tile_confirmed = 0
-        self._tile_missed = 0
-        self._phase4_start = None
-        self._end_belt_start = None
+        self._tile_found = False
+        self._stop_reason = None
+        self.phase_pub = self.create_publisher(Int32, "/inspector_phase", 10)
+        self.tile_status_sub = self.create_subscription(
+            String, "/tile_status", self._tile_status_callback, 10
+        )
+        self._tile_process = None
         self._phase5_sub = 0
+        self._end_belt_start = None
         self._phase5_start = None
 
         self.create_timer(0.1, self._update)
@@ -96,6 +100,11 @@ class StationInspector(Node):
         self.state = new_state
         msg = String()
         msg.data = new_state
+        self.state_pub.publish(msg)
+
+    def _publish_substate(self, label):
+        msg = String()
+        msg.data = label
         self.state_pub.publish(msg)
 
     def _resolve_yaml_path(self):
@@ -238,35 +247,11 @@ class StationInspector(Node):
         ratio = cv2.countNonZero(mask) / max(1, roi_hsv.shape[0] * roi_hsv.shape[1])
         return ratio > 0.5
 
-    def _tile_in_view(self):
-        if self.latest_gray is None:
-            return False
-        gray = self.latest_gray
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        if self.ws_key == "red":
-            edges = cv2.Canny(blurred, 150, 300)
-        else:
-            edges = cv2.Canny(blurred, 120, 240)
-        edges = cv2.dilate(edges, np.ones((7, 7), np.uint8), iterations=3)
-
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        h, w = gray.shape
-        frame_area = h * w
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < frame_area * 0.08:
-                continue
-            peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.04 * peri, True)
-            if len(approx) != 4:
-                continue
-            if not cv2.isContourConvex(approx):
-                continue
-            _, _, bw, bh = cv2.boundingRect(approx)
-            if max(bw, bh) / max(min(bw, bh), 1) > 2.0:
-                continue
-            return True
-        return False
+    def _tile_status_callback(self, msg):
+        if msg.data == "TILE_FOUND":
+            self._tile_found = True
+        elif msg.data == "TILE_LEFT":
+            self._tile_found = False
 
     def _check_workstation_color_bottom_left(self):
         if self.latest_oakd is None:
@@ -359,6 +344,16 @@ class StationInspector(Node):
             elif self.nav_goal_done:
                 if self.nav_succeeded:
                     self.get_logger().info("Approach point reached. Fine-positioning.")
+                    if self._tile_process is None:
+                        from ament_index_python.packages import get_package_prefix
+                        _prefix = get_package_prefix("task1")
+                        _exe = os.path.join(_prefix, "lib", "task1", "tile_detect")
+                        self._tile_process = subprocess.Popen(
+                            [sys.executable, _exe],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
+                        )
+                        self.get_logger().info(f"Started tile_detect subprocess ({_exe})")
                     self._publish_arm("look_at_belt_left")
                     self._set_state("FINE_POSITION")
                     self.fine_pos_phase = 0
@@ -367,6 +362,9 @@ class StationInspector(Node):
                     self.nav_goal_sent = False
 
         elif self.state == "FINE_POSITION":
+            phase_msg = Int32()
+            phase_msg.data = self.fine_pos_phase
+            self.phase_pub.publish(phase_msg)
             if self.fine_pos_phase == 0:
                 min_dist = self._get_min_forward_distance()
                 if min_dist is None:
@@ -426,6 +424,30 @@ class StationInspector(Node):
             elif self.fine_pos_phase == 2:
                 rho, theta = self._hough_tilt()
 
+                if self.latest_gray is not None:
+                    h, w = self.latest_gray.shape
+                    dy = np.abs(np.diff(self.latest_gray.astype(np.int16), axis=0)).astype(np.uint16)
+                    dy_norm = (dy / (dy.max() + 1e-6) * 255).astype(np.uint8)
+                    top = dy_norm[:max(1, h // 3), :]
+                    blur = cv2.GaussianBlur(top, (3, 3), 0)
+                    _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    vis = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+                    if theta is not None:
+                        a = math.cos(theta)
+                        b = math.sin(theta)
+                        x0 = a * rho
+                        y0 = b * rho
+                        x1 = int(x0 + 1000 * (-b))
+                        y1 = int(y0 + 1000 * (a))
+                        x2 = int(x0 - 1000 * (-b))
+                        y2 = int(y0 - 1000 * (a))
+                        cv2.line(vis, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                        tilt = math.degrees(theta - math.pi / 2)
+                        cv2.putText(vis, f"tilt={tilt:+.1f}deg", (5, 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    cv2.imshow("Phase 2 Hough alignment", vis)
+                    cv2.waitKey(1)
+
                 if theta is None:
                     self.get_logger().info(
                         "Phase 2 waiting for Hough line...",
@@ -444,6 +466,7 @@ class StationInspector(Node):
                     self.get_logger().info(
                         f"Perfectly aligned (tilt={angle_deg:+.1f}deg), starting backup"
                     )
+                    cv2.destroyWindow("Phase 2 Hough alignment")
                     self.fine_pos_phase = 3
                     return
 
@@ -457,25 +480,53 @@ class StationInspector(Node):
                 self._publish_rear_cone_marker()
 
                 rear_dist = self._get_rear_distance()
-                yellow = self._check_yellow_bottom_left()
+                yellow_ok = False
+
+                if self.latest_oakd is not None:
+                    h, w = self.latest_oakd.shape[:2]
+                    roi = self.latest_oakd[max(0, h - 30):, :w // 2]
+                    roi_pix = roi.shape[0] * roi.shape[1]
+                    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+                    yel = (cv2.inRange(hsv_roi, np.array([20, 80, 80]), np.array([35, 255, 255])) > 0).sum()
+                    red = ((cv2.inRange(hsv_roi, np.array([0, 80, 80]), np.array([10, 255, 255])) > 0).sum() +
+                           (cv2.inRange(hsv_roi, np.array([170, 80, 80]), np.array([180, 255, 255])) > 0).sum())
+                    grn = (cv2.inRange(hsv_roi, np.array([40, 80, 80]), np.array([80, 255, 255])) > 0).sum()
+
+                    yel_ratio = yel / max(roi_pix, 1)
+                    yellow_ok = yel > (red + grn) / 2.0
+
+                    debug = roi.copy()
+                    debug[cv2.inRange(hsv_roi, np.array([20, 80, 80]), np.array([35, 255, 255])) > 0] = (0, 255, 255)
+                    dist_str = f"{rear_dist:.2f}m" if rear_dist else "N/A"
+                    cv2.putText(debug, f"Y_ratio={yel_ratio:.2f} dist={dist_str}",
+                                (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                    color_reason = getattr(self, "_stop_reason", None)
+                    if color_reason:
+                        cv2.putText(debug, f"trigger: {color_reason}",
+                                    (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                    cv2.imshow("Phase 3 backup", debug)
+                    cv2.waitKey(1)
 
                 self.get_logger().info(
-                    f"Phase 3 backup rear={rear_dist:.2f}m yellow={yellow}",
+                    f"Phase 3 backup rear={rear_dist:.2f}m yellow_ok={yellow_ok}",
                     throttle_duration_sec=0.5,
                 )
 
-                if yellow:
+                if yellow_ok:
                     self._stop_robot()
+                    self._stop_reason = "True (yellow)"
                     self.get_logger().info("Backup complete: yellow line detected")
-                    self._phase4_start = self.get_clock().now()
                     self.fine_pos_phase = 4
+                    self._publish_substate("SCAN_TILES")
                     return
 
                 if rear_dist is not None and rear_dist <= 0.40:
                     self._stop_robot()
+                    self._stop_reason = "False (rear obstacle)"
                     self.get_logger().info("Backup complete: rear obstacle at 0.40m")
-                    self._phase4_start = self.get_clock().now()
                     self.fine_pos_phase = 4
+                    self._publish_substate("SCAN_TILES")
                     return
 
                 msg = Twist()
@@ -485,93 +536,66 @@ class StationInspector(Node):
 
             elif self.fine_pos_phase == 4:
                 color_present = self._check_workstation_color_bottom_left()
-                yellow = self._check_yellow_bottom_left()
                 no_colour = not color_present
 
                 if self.latest_oakd is not None:
-                    hsv = cv2.cvtColor(self.latest_oakd, cv2.COLOR_BGR2HSV)
-                    h, w = hsv.shape[:2]
-                    roi = self.latest_oakd[max(0, h - 30):, :w // 2]
-                    roi_hsv = hsv[max(0, h - 30):, :w // 2]
-                    yel = cv2.inRange(roi_hsv, np.array([20, 80, 80]), np.array([35, 255, 255]))
-                    if self.ws_key == "red":
-                        m1 = cv2.inRange(roi_hsv, np.array([0, 80, 80]), np.array([10, 255, 255]))
-                        m2 = cv2.inRange(roi_hsv, np.array([170, 80, 80]), np.array([180, 255, 255]))
-                        col_mask = cv2.bitwise_or(m1, m2)
+                    debug = self.latest_oakd[max(0, self.latest_oakd.shape[0] - 30):, :self.latest_oakd.shape[1] // 2].copy()
+                    if no_colour:
+                        cv2.putText(debug, "END OF STATION", (5, 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                     else:
-                        col_mask = cv2.inRange(roi_hsv, np.array([40, 80, 80]), np.array([80, 255, 255]))
-                    debug = roi.copy()
-                    debug[col_mask > 0] = (0, 255, 255)
-                    debug[yel > 0] = (255, 255, 0)
-                    cv2.imshow("Phase 4 OAK-D (cyan=colour, yellow=yellow)", debug)
-                    cv2.waitKey(1)
-
-                has_tile = self._tile_in_view()
-                self.get_logger().info(
-                    f"Phase 4 tile={has_tile} col={color_present}",
-                    throttle_duration_sec=0.3,
-                )
-
-                if self.latest_gray is not None:
-                    blurred = cv2.GaussianBlur(self.latest_gray, (5, 5), 0)
-                    if self.ws_key == "red":
-                        edges = cv2.Canny(blurred, 150, 300)
-                    else:
-                        edges = cv2.Canny(blurred, 120, 240)
-                    edges = cv2.dilate(edges, np.ones((7, 7), np.uint8), iterations=3)
-                    vis = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-                    cv2.putText(
-                        vis, f"tile={has_tile}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
-                    )
-                    cv2.imshow("Phase 4 contour detect", vis)
+                        cv2.putText(debug, "scanning...", (5, 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    cv2.imshow("Phase 4 station status", debug)
                     cv2.waitKey(1)
 
                 now = self.get_clock().now()
-                elapsed = (now - self._phase4_start).nanoseconds / 1e9 if self._phase4_start is not None else 0.0
 
-                if elapsed >= 8.0 and no_colour:
+                if no_colour:
                     if self._end_belt_start is None:
                         self._end_belt_start = now
-                        self.get_logger().info("No colour — confirming end of belt for 2s")
-                    elif (now - self._end_belt_start).nanoseconds / 1e9 >= 2.0:
-                        self._stop_robot()
-                        self._publish_arm("garage")
-                        self.get_logger().info("End of belt confirmed")
-                        self.fine_pos_phase = 5
-                        self._phase5_sub = 0
-                        self._phase5_start = None
-                        return
-                else:
-                    self._end_belt_start = None
+                        self.get_logger().info("No colour — driving 5s more for final tiles")
 
                 if self._tile_stop_start is not None:
                     elapsed_s = (now - self._tile_stop_start).nanoseconds / 1e9
                     if elapsed_s >= 2.0:
                         self._tile_stop_start = None
-                        self.get_logger().info(f"Resuming after {elapsed_s:.1f}s stop")
+                        self._tile_found = False
+                        if self._end_belt_start is not None:
+                            self.get_logger().info("Final tile done, escaping")
+                            self._stop_robot()
+                            self._publish_arm("garage")
+                            self.fine_pos_phase = 5
+                            self._publish_substate("ESCAPING_WORKSTATION")
+                            self._phase5_sub = 0
+                            self._phase5_start = None
+                            return
+                        self._publish_substate("SCAN_TILES")
+                        self.get_logger().info("Resuming after tile stop")
                     else:
                         return
                     return
 
-                if has_tile:
-                    self._end_belt_start = None
-                    self._tile_missed = 0
-                    self._tile_confirmed += 1
-                    if self._tile_confirmed >= 5 and not self._tile_was_visible:
+                if self._tile_found and self._tile_stop_start is None:
+                    self._stop_robot()
+                    self._tile_stop_start = now
+                    self._publish_substate("TILE_FOUND")
+                    self.get_logger().info("Tile found, stopping for 2s")
+                    return
+
+                if no_colour:
+                    elapsed = (now - self._end_belt_start).nanoseconds / 1e9
+                    if elapsed >= 5.0:
+                        self.get_logger().info("No tile in 5s without color, escaping")
                         self._stop_robot()
-                        self._tile_stop_start = now
-                        self._tile_was_visible = True
-                        self.get_logger().info("Tile confirmed, stopping for 2s")
+                        self._publish_arm("garage")
+                        self.fine_pos_phase = 5
+                        self._publish_substate("ESCAPING_WORKSTATION")
+                        self._phase5_sub = 0
+                        self._phase5_start = None
                         return
                 else:
-                    self._tile_confirmed = 0
-                    if self._tile_was_visible:
-                        self._tile_missed += 1
-                        if self._tile_missed >= 5:
-                            self._tile_was_visible = False
-                            self._tile_missed = 0
-                            self.get_logger().info("Tile left view, ready for next")
+                    self._end_belt_start = None
 
                 msg = Twist()
                 msg.linear.x = 0.08
@@ -609,12 +633,25 @@ class StationInspector(Node):
                     if elapsed >= 4:
                         self._stop_robot()
                         self._phase5_sub = 2
-                        self.get_logger().info("Escape complete")
+                        self.get_logger().info("Escape complete, shutting down")
+                        rclpy.shutdown()
                         return
                     msg = Twist()
                     msg.linear.x = 0.3
                     msg.angular.z = 0.0
                     self.cmd_pub.publish(msg)
+
+
+    def destroy_node(self):
+        if self._tile_process is not None:
+            self._tile_process.terminate()
+            try:
+                self._tile_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._tile_process.kill()
+            self._tile_process = None
+            self.get_logger().info("Terminated tile_detect subprocess")
+        super().destroy_node()
 
 
 def main(args=None):

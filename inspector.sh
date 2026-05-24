@@ -13,4 +13,4 @@ fi
 
 source /home/zeta/RINS_Project/install/setup.bash
 
-ros2 launch task1 anomaly_inspection.launch.py workstation:="$COLOR"
+ros2 launch task1 test_inspector.launch.py workstation:="$COLOR"

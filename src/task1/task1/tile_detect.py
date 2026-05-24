@@ -1,7 +1,10 @@
+import math
+import time as time_module
 import cv2
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from std_msgs.msg import String, Int32
 from cv_bridge import CvBridge
 import numpy as np
 
@@ -14,81 +17,235 @@ class TileDetect(Node):
             Image, "/top_camera/rgb/preview/image_raw", self._img_cb, 10
         )
         self.latest_gray = None
+        self.latest_bgr = None
         self._tile_was_visible = False
         self._tile_missed = 0
         self._count = 0
+        self._bright_hit = 0
+        self._bright_missed = 0
+        self._bright_ready = False
+        self.status_pub = self.create_publisher(String, "/tile_status", 10)
+        self.warped_pub = self.create_publisher(Image, "/tile_warped", 10)
+        self._inspector_phase = -1
+        self.phase_sub = self.create_subscription(
+            Int32, "/inspector_phase", self._phase_callback, 10
+        )
+        self._last_box = None
+        self._capture_pending = False
+        self._capture_trigger_time = 0.0
+        self._capture_done = False
         self.create_timer(0.1, self._update)
-        self.get_logger().info("TileDetect ready — contour mode")
+        self.get_logger().info("TileDetect ready — Otsu detect + warp + publish")
 
     def _img_cb(self, msg):
         try:
-            self.latest_gray = self.bridge.imgmsg_to_cv2(msg, "mono8")
+            bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            self.latest_bgr = bgr
+            self.latest_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         except Exception:
             pass
 
-    def _find_square(self, gray):
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 120, 240)
-        edges = cv2.dilate(edges, np.ones((7, 7), np.uint8), iterations=3)
+    def _phase_callback(self, msg):
+        self._inspector_phase = msg.data
 
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    def _brightness_trigger(self, gray):
         h, w = gray.shape
-        frame_area = h * w
+        roi = gray[h // 2 - 5 : h // 2 + 5, w // 3 - 10 : w // 3 + 10]
+        bright_ratio = (roi > 100).sum() / roi.size
+
+        if bright_ratio >= 0.5:
+            self._bright_hit += 1
+            self._bright_missed = 0
+            if self._bright_hit >= 3:
+                self._bright_ready = True
+        else:
+            self._bright_missed += 1
+            self._bright_hit = 0
+            if self._bright_missed >= 10:
+                self._bright_ready = False
+
+        return self._bright_ready
+
+    def _find_tile(self, gray):
+        h, w = gray.shape
+        crop_y = h // 5
+        crop = gray[crop_y:, :]
+
+        _, thresh = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        cy, cx = crop.shape[0] // 2, crop.shape[1] // 2
+        if thresh[cy, cx] == 0:
+            thresh = 255 - thresh
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+        mask_full = np.zeros(gray.shape[:2], dtype=np.uint8)
+        mask_full[crop_y:, :] = thresh
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        frame_area = crop.shape[0] * crop.shape[1]
         best = None
         for c in contours:
             area = cv2.contourArea(c)
-            if area < frame_area * 0.08:
+            if area < frame_area * 0.05 or area > frame_area * 0.5:
                 continue
-            peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.04 * peri, True)
-            if len(approx) != 4:
-                continue
-            if not cv2.isContourConvex(approx):
-                continue
-            _, _, bw, bh = cv2.boundingRect(approx)
+            rect = cv2.minAreaRect(c)
+            box = cv2.boxPoints(rect)
+            bw = math.hypot(box[0][0] - box[1][0], box[0][1] - box[1][1])
+            bh = math.hypot(box[1][0] - box[2][0], box[1][1] - box[2][1])
             if max(bw, bh) / max(min(bw, bh), 1) > 2.0:
                 continue
-            best = approx
-            break
-        return best, edges
+            if best is None or area > cv2.contourArea(best):
+                best = c
+
+        if best is None:
+            return None, mask_full
+
+        rect = cv2.minAreaRect(best)
+        box = cv2.boxPoints(rect)
+        box[:, 1] += crop_y
+
+        return box.astype(np.int32), mask_full
+
+    def _get_edge_points(self, mask_full):
+        contours, _ = cv2.findContours(mask_full, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        best = max(contours, key=cv2.contourArea)
+        hull = cv2.convexHull(best)
+        peri = cv2.arcLength(hull, True)
+        quad = cv2.approxPolyDP(hull, 0.02 * peri, True)
+
+        if len(quad) != 4:
+            return None
+
+        corners = quad.reshape(4, 2)
+        pts = []
+        n = len(corners)
+        for i in range(n):
+            x1, y1 = corners[i]
+            x2, y2 = corners[(i + 1) % n]
+            for t in range(16):
+                frac = t / 15.0
+                ix = int(round(x1 + (x2 - x1) * frac))
+                iy = int(round(y1 + (y2 - y1) * frac))
+                pts.append((ix, iy))
+        return pts
+
+    @staticmethod
+    def _order_points(pts):
+        """Order 4 corners: TL, TR, BR, BL."""
+        rect = np.zeros((4, 2), dtype=np.float32)
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
+        diff = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
+        return rect
+
+    def _warp_tile(self):
+        """Warp detected tile region to fronto-parallel view and publish."""
+        if self.latest_bgr is None or self._last_box is None:
+            return
+        src = self._order_points(self._last_box.astype(np.float32))
+        w = max(np.linalg.norm(src[1] - src[0]), np.linalg.norm(src[2] - src[3]))
+        h = max(np.linalg.norm(src[3] - src[0]), np.linalg.norm(src[2] - src[1]))
+        if w < 10 or h < 10:
+            return
+        dst = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
+        H = cv2.getPerspectiveTransform(src, dst)
+        warped = cv2.warpPerspective(self.latest_bgr, H, (int(w), int(h)))
+        msg = self.bridge.cv2_to_imgmsg(warped, "bgr8")
+        msg.header.stamp = self.get_clock().now().to_msg()
+        self.warped_pub.publish(msg)
+        self.get_logger().info(f"Published warped tile ({int(w)}×{int(h)})")
 
     def _update(self):
         if self.latest_gray is None:
             self.get_logger().info("Waiting for camera...", throttle_duration_sec=2.0)
             return
         gray = self.latest_gray
-        square, edges = self._find_square(gray)
+        ready = self._brightness_trigger(gray)
 
-        has_tile = square is not None
+        box, mask_full = None, None
+        if ready:
+            box, mask_full = self._find_tile(gray)
+        else:
+            mask_full = np.zeros_like(gray)
 
-        if has_tile:
+        # Only detect and count during scan phase (inspector phase == 4)
+        scanning = self._inspector_phase == 4
+        has_tile = box is not None and scanning
+
+        if scanning and has_tile:
             self._tile_missed = 0
             if not self._tile_was_visible:
                 self._count += 1
                 self._tile_was_visible = True
+                self._last_box = box.copy()
+                self._capture_pending = True
+                self._capture_trigger_time = time_module.time()
+                self._capture_done = False
                 self.get_logger().info(f"Tile #{self._count}")
-        else:
+                self.status_pub.publish(String(data="TILE_FOUND"))
+        elif scanning and not has_tile:
             if self._tile_was_visible:
                 self._tile_missed += 1
                 if self._tile_missed >= 5:
                     self._tile_was_visible = False
                     self._tile_missed = 0
+                    self._capture_pending = False
+                    self._capture_done = False
+                    self.status_pub.publish(String(data="TILE_LEFT"))
+        elif not scanning:
+            self._tile_was_visible = False
+            self._tile_missed = 0
+            self._capture_pending = False
+            self._capture_done = False
 
-        vis = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        if square is not None:
-            cv2.drawContours(vis, [square], -1, (0, 200, 0), 3)
+        # Fire capture 0.5s after first detection (robot should be stationary)
+        if self._capture_pending and not self._capture_done:
+            if time_module.time() - self._capture_trigger_time >= 0.5:
+                self._capture_done = True
+                self._capture_pending = False
+                self._warp_tile()
 
-        cv2.putText(
-            vis, f"Tiles: {self._count}", (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
-        )
+        # Window 1: Otsu mask with fitted rectangle
+        vis = cv2.cvtColor(mask_full, cv2.COLOR_GRAY2BGR)
         if has_tile:
-            cv2.putText(
-                vis, "TILE", (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
-            )
-
+            cv2.drawContours(vis, [box], -1, (0, 200, 0), 2)
+        cv2.putText(vis, f"Tiles: {self._count}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        if scanning:
+            if has_tile:
+                cv2.putText(vis, "TILE", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            else:
+                cv2.putText(vis, "scanning...", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, 128, 1)
+        else:
+            cv2.putText(vis, f"phase={self._inspector_phase} waiting...", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, 128, 1)
         cv2.imshow("Tile detect", vis)
+
+        # Window 2: raw camera with hull-refined red dots
+        raw_vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        h, w = gray.shape
+        x1, x2 = w // 3 - 10, w // 3 + 10
+        y1, y2 = h // 2 - 5, h // 2 + 5
+        cv2.rectangle(raw_vis, (x1, y1), (x2, y2), (0, 255, 0) if ready else (0, 0, 255), 1)
+        if has_tile:
+            pts = self._get_edge_points(mask_full)
+            if pts:
+                for pt in pts:
+                    cv2.circle(raw_vis, pt, 2, (0, 0, 255), -1)
+        cv2.putText(raw_vis, f"bright={ready} phase={self._inspector_phase}", (5, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        cv2.imshow("Tile raw edges", raw_vis)
         cv2.waitKey(1)
 
 
