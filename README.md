@@ -4,10 +4,10 @@
 
 ```bash
 # 1. Start the simulator
-./server_sim.sh
+./server.sh
 
 # 2. Launch the robot stack
-./run_sim.sh        # opens RViz, loads maps
+./sim_run.sh        # opens RViz, loads maps
 
 # 3. Start the task
 ros2 launch task1 task1.launch.py
@@ -18,6 +18,9 @@ ros2 launch task1 task1.launch.py
 
 Build:
 ```bash
+./colcon_build.sh
+
+# the above script contains
 colcon build --merge-install
 # or a single package:
 colcon build --packages-select task1 --merge-install
@@ -40,6 +43,7 @@ colcon build --packages-select task1 --merge-install
 | `behavior_manager.py` | `task1` | Central state machine: patrol → approach → interact → return |
 | `waypoint_navigator.py` | `task1` | Executes predefined waypoint patrol via Nav2 |
 | `robot_state_overlay.py` | `task1` | RViz 2D overlay showing current robot state |
+
 
 **Robot states:** `IDLE` → `PATROL` → `APPROACH_FACE / RING / CYLINDER` → `INTERACT_*` → `RETURN_TO_PATROL`
 

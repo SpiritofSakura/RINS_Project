@@ -16,14 +16,15 @@ import signal
 def main():
     processes = []
     try:
-        for node in ("tile_detect", "tile_classifier"):
-            p = subprocess.Popen(
-                ["ros2", "run", "task1", node],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
-            )
-            processes.append(p)
-            print(f"Started {node} (PID {p.pid})", file=sys.stderr)
+        detect_cmd = ["ros2", "run", "task1", "tile_detect",
+                      "--ros-args", "-p", "debug_mode:=true"]
+        p = subprocess.Popen(detect_cmd)
+        processes.append(p)
+        print(f"Started tile_detect (debug) PID {p.pid}")
+
+        p = subprocess.Popen(["ros2", "run", "task1", "tile_classifier"])
+        processes.append(p)
+        print(f"Started tile_classifier PID {p.pid}")
 
         for p in processes:
             p.wait()

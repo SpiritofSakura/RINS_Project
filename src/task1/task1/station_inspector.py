@@ -81,10 +81,12 @@ class StationInspector(Node):
         self._tile_found = False
         self._stop_reason = None
         self.phase_pub = self.create_publisher(Int32, "/inspector_phase", 10)
+        self.station_pub = self.create_publisher(String, "/inspector_station", 10)
         self.tile_status_sub = self.create_subscription(
             String, "/tile_status", self._tile_status_callback, 10
         )
         self._tile_process = None
+        self._classifier_process = None
         self._phase5_sub = 0
         self._end_belt_start = None
         self._phase5_start = None
@@ -347,13 +349,21 @@ class StationInspector(Node):
                     if self._tile_process is None:
                         from ament_index_python.packages import get_package_prefix
                         _prefix = get_package_prefix("task1")
-                        _exe = os.path.join(_prefix, "lib", "task1", "tile_detect")
+                        _lib = os.path.join(_prefix, "lib", "task1")
                         self._tile_process = subprocess.Popen(
-                            [sys.executable, _exe],
+                            [sys.executable, os.path.join(_lib, "tile_detect")],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
                         )
-                        self.get_logger().info(f"Started tile_detect subprocess ({_exe})")
+                        self.get_logger().info(f"Started tile_detect ({_lib})")
+                        self._classifier_process = subprocess.Popen(
+                            [sys.executable, os.path.join(_lib, "tile_classifier")],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
+                        )
+                        self.get_logger().info(f"Started tile_classifier ({_lib})")
+                    self.station_pub.publish(String(data=self.ws_key))
+                    self.get_logger().info(f"Published station: {self.ws_key}")
                     self._publish_arm("look_at_belt_left")
                     self._set_state("FINE_POSITION")
                     self.fine_pos_phase = 0
@@ -642,15 +652,21 @@ class StationInspector(Node):
                     self.cmd_pub.publish(msg)
 
 
+    def _kill_proc(self, proc, name):
+        if proc is None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        self.get_logger().info(f"Terminated {name}")
+
     def destroy_node(self):
-        if self._tile_process is not None:
-            self._tile_process.terminate()
-            try:
-                self._tile_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._tile_process.kill()
-            self._tile_process = None
-            self.get_logger().info("Terminated tile_detect subprocess")
+        self._kill_proc(self._tile_process, "tile_detect")
+        self._tile_process = None
+        self._kill_proc(self._classifier_process, "tile_classifier")
+        self._classifier_process = None
         super().destroy_node()
 
 

@@ -13,9 +13,12 @@ from cv_bridge import CvBridge
 import torch
 import segmentation_models_pytorch as smp
 
-CHECKPOINT = Path(__file__).parent.parent.parent / "anomaly_detection" / "results" / "unet" / "best_model.pth"
+_root = Path(__file__).resolve()
+while not (_root / "src" / "anomaly_detection").exists():
+    _root = _root.parent
+CHECKPOINT = _root / "src" / "anomaly_detection" / "results" / "unet" / "best_model.pth"
 IMAGE_SIZE = 512
-THRESHOLD = 0.35
+THRESHOLD = 0.20
 MIN_DEFECT_RATIO = 0.001
 
 MORPH_OPEN_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -43,6 +46,7 @@ class TileClassifier(Node):
         self.bridge = CvBridge()
         self.sub = self.create_subscription(Image, "/tile_warped", self._warped_cb, 10)
         self.result_pub = self.create_publisher(String, "/tile_classification", 10)
+        self.heatmap_pub = self.create_publisher(Image, "/tile_heatmap", 10)
         self._model = None
         self._transform = make_transform(IMAGE_SIZE)
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -120,13 +124,27 @@ class TileClassifier(Node):
             self.get_logger().error(f"Bridge error: {e}")
             return
 
-        label, defect_ratio, pred, prob = self._classify(bgr)
-        self.get_logger().info(f"Classification: {label}  (defect={defect_ratio*100:.2f}%)")
+        self.get_logger().info(f"Received warped tile ({bgr.shape[1]}x{bgr.shape[0]})")
+        cv2.imshow("raw_input", bgr)
 
-        self.result_pub.publish(String(data=label))
+        try:
+            label, defect_ratio, pred, prob = self._classify(bgr)
+            self.get_logger().info(f"Classification: {label}  (defect={defect_ratio*100:.2f}%)")
 
-        panel = self._draw_visualization(bgr, label, defect_ratio, pred, prob)
-        cv2.imshow("Tile Classifier", panel)
+            heatmap = cv2.applyColorMap((prob * 255).astype(np.uint8), cv2.COLORMAP_JET)
+            blended = cv2.addWeighted(bgr, 0.5, heatmap, 0.5, 0)
+            heatmap_msg = self.bridge.cv2_to_imgmsg(blended, "bgr8")
+            self.heatmap_pub.publish(heatmap_msg)
+
+            self.result_pub.publish(String(data=label))
+
+            panel = self._draw_visualization(bgr, label, defect_ratio, pred, prob)
+            cv2.imshow("analysis", panel)
+        except Exception as e:
+            self.get_logger().error(f"Classification failed: {e}")
+            import traceback
+            traceback.print_exc()
+
         cv2.waitKey(1)
 
 

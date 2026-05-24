@@ -12,6 +12,8 @@ import numpy as np
 class TileDetect(Node):
     def __init__(self):
         super().__init__("tile_detect")
+        self.declare_parameter("debug_mode", False)
+        self._debug_mode = self.get_parameter("debug_mode").value
         self.bridge = CvBridge()
         self.sub = self.create_subscription(
             Image, "/top_camera/rgb/preview/image_raw", self._img_cb, 10
@@ -31,11 +33,14 @@ class TileDetect(Node):
             Int32, "/inspector_phase", self._phase_callback, 10
         )
         self._last_box = None
+        self._last_corners = None
         self._capture_pending = False
         self._capture_trigger_time = 0.0
         self._capture_done = False
+        self._latest_warped = None
         self.create_timer(0.1, self._update)
-        self.get_logger().info("TileDetect ready — Otsu detect + warp + publish")
+        mode = "DEBUG" if self._debug_mode else "NORMAL"
+        self.get_logger().info(f"TileDetect ready — Otsu detect + warp + publish  [{mode}]")
 
     def _img_cb(self, msg):
         try:
@@ -109,20 +114,22 @@ class TileDetect(Node):
 
         return box.astype(np.int32), mask_full
 
-    def _get_edge_points(self, mask_full):
+    def _get_tile_quad(self, mask_full):
+        """Return the 4 true corners of the tile (convex hull + poly approx), or None."""
         contours, _ = cv2.findContours(mask_full, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None
-
         best = max(contours, key=cv2.contourArea)
         hull = cv2.convexHull(best)
-        peri = cv2.arcLength(hull, True)
-        quad = cv2.approxPolyDP(hull, 0.02 * peri, True)
-
+        quad = cv2.approxPolyDP(hull, 0.02 * cv2.arcLength(hull, True), True)
         if len(quad) != 4:
             return None
+        return quad.reshape(4, 2).astype(np.float32)
 
-        corners = quad.reshape(4, 2)
+    def _get_edge_points(self, mask_full):
+        corners = self._get_tile_quad(mask_full)
+        if corners is None:
+            return None
         pts = []
         n = len(corners)
         for i in range(n):
@@ -137,21 +144,21 @@ class TileDetect(Node):
 
     @staticmethod
     def _order_points(pts):
-        """Order 4 corners: TL, TR, BR, BL."""
-        rect = np.zeros((4, 2), dtype=np.float32)
-        s = pts.sum(axis=1)
-        rect[0] = pts[np.argmin(s)]
-        rect[2] = pts[np.argmax(s)]
-        diff = np.diff(pts, axis=1)
-        rect[1] = pts[np.argmin(diff)]
-        rect[3] = pts[np.argmax(diff)]
-        return rect
+        sorted_by_y = pts[pts[:, 1].argsort()]
+        top = sorted_by_y[:2][sorted_by_y[:2, 0].argsort()]
+        bot = sorted_by_y[2:][sorted_by_y[2:, 0].argsort()]
+        return np.array([top[0], top[1], bot[1], bot[0]], dtype=np.float32)
 
     def _warp_tile(self):
         """Warp detected tile region to fronto-parallel view and publish."""
-        if self.latest_bgr is None or self._last_box is None:
+        if self.latest_bgr is None or self._last_corners is None:
             return
-        src = self._order_points(self._last_box.astype(np.float32))
+        src = self._order_points(self._last_corners)
+        inset = 0.06
+        for i in range(4):
+            prev = src[(i - 1) % 4]
+            nxt = src[(i + 1) % 4]
+            src[i] = src[i] + inset * (prev - src[i]) + inset * (nxt - src[i])
         w = max(np.linalg.norm(src[1] - src[0]), np.linalg.norm(src[2] - src[3]))
         h = max(np.linalg.norm(src[3] - src[0]), np.linalg.norm(src[2] - src[1]))
         if w < 10 or h < 10:
@@ -159,6 +166,7 @@ class TileDetect(Node):
         dst = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
         H = cv2.getPerspectiveTransform(src, dst)
         warped = cv2.warpPerspective(self.latest_bgr, H, (int(w), int(h)))
+        self._latest_warped = warped.copy()
         msg = self.bridge.cv2_to_imgmsg(warped, "bgr8")
         msg.header.stamp = self.get_clock().now().to_msg()
         self.warped_pub.publish(msg)
@@ -177,8 +185,9 @@ class TileDetect(Node):
         else:
             mask_full = np.zeros_like(gray)
 
-        # Only detect and count during scan phase (inspector phase == 4)
-        scanning = self._inspector_phase == 4
+        # Only detect and count during scan phase (inspector phase == 4),
+        # unless debug_mode is set (always detect).
+        scanning = self._debug_mode or self._inspector_phase == 4
         has_tile = box is not None and scanning
 
         if scanning and has_tile:
@@ -187,6 +196,8 @@ class TileDetect(Node):
                 self._count += 1
                 self._tile_was_visible = True
                 self._last_box = box.copy()
+                hull_corners = self._get_tile_quad(mask_full)
+                self._last_corners = hull_corners if hull_corners is not None else box.astype(np.float32)
                 self._capture_pending = True
                 self._capture_trigger_time = time_module.time()
                 self._capture_done = False
@@ -198,12 +209,14 @@ class TileDetect(Node):
                 if self._tile_missed >= 5:
                     self._tile_was_visible = False
                     self._tile_missed = 0
+                    self._last_corners = None
                     self._capture_pending = False
                     self._capture_done = False
                     self.status_pub.publish(String(data="TILE_LEFT"))
         elif not scanning:
             self._tile_was_visible = False
             self._tile_missed = 0
+            self._last_corners = None
             self._capture_pending = False
             self._capture_done = False
 
@@ -246,6 +259,17 @@ class TileDetect(Node):
         cv2.putText(raw_vis, f"bright={ready} phase={self._inspector_phase}", (5, 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
         cv2.imshow("Tile raw edges", raw_vis)
+
+        if self._latest_warped is not None:
+            h_w, w_w = self._latest_warped.shape[:2]
+            max_disp = 400
+            scale = min(max_disp / w_w, max_disp / h_w, 1.0)
+            if scale < 1.0:
+                disp = cv2.resize(self._latest_warped, (int(w_w * scale), int(h_w * scale)))
+            else:
+                disp = self._latest_warped
+            cv2.imshow("Tile warped", disp)
+
         cv2.waitKey(1)
 
 
