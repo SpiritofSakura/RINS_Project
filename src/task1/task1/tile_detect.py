@@ -169,6 +169,7 @@ class TileDetect(Node):
         self._latest_warped = warped.copy()
         msg = self.bridge.cv2_to_imgmsg(warped, "bgr8")
         msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = str(self._count)
         self.warped_pub.publish(msg)
         self.get_logger().info(f"Published warped tile ({int(w)}×{int(h)})")
 

@@ -19,7 +19,7 @@ while not (_root / "src" / "anomaly_detection").exists():
 CHECKPOINT = _root / "src" / "anomaly_detection" / "results" / "unet" / "best_model.pth"
 IMAGE_SIZE = 512
 THRESHOLD = 0.20
-MIN_DEFECT_RATIO = 0.001
+MIN_DEFECT_RATIO = 0.002
 
 MORPH_OPEN_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 MORPH_CLOSE_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -131,12 +131,14 @@ class TileClassifier(Node):
             label, defect_ratio, pred, prob = self._classify(bgr)
             self.get_logger().info(f"Classification: {label}  (defect={defect_ratio*100:.2f}%)")
 
+            tile_id = msg.header.frame_id
             heatmap = cv2.applyColorMap((prob * 255).astype(np.uint8), cv2.COLORMAP_JET)
             blended = cv2.addWeighted(bgr, 0.5, heatmap, 0.5, 0)
             heatmap_msg = self.bridge.cv2_to_imgmsg(blended, "bgr8")
+            heatmap_msg.header.frame_id = tile_id
             self.heatmap_pub.publish(heatmap_msg)
 
-            self.result_pub.publish(String(data=label))
+            self.result_pub.publish(String(data=f"{label}:{tile_id}"))
 
             panel = self._draw_visualization(bgr, label, defect_ratio, pred, prob)
             cv2.imshow("analysis", panel)

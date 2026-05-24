@@ -68,9 +68,9 @@ ID 5 Anomaly Inspection Visuals:
 **Station:** Red
 
 ### Results:
-- **Total number of tiles inspected:** 8
-- **OK:** 2
-- **DEFECT:** 6
+- **Total number of tiles inspected:** 4
+- **OK:** 1
+- **DEFECT:** 3
 
 | Tile ID | Status |
 | :---: | :---: |
@@ -78,10 +78,6 @@ ID 5 Anomaly Inspection Visuals:
 | 2 | DEFECT |
 | 3 | DEFECT |
 | 4 | DEFECT |
-| 5 | OK |
-| 6 | DEFECT |
-| 7 | DEFECT |
-| 8 | DEFECT |
 
 ID 2 Anomaly Inspection Visuals:
 
@@ -96,19 +92,4 @@ ID 3 Anomaly Inspection Visuals:
 ID 4 Anomaly Inspection Visuals:
 
 ![Defect texture](/home/zeta/RINS_Project/reports/img/defects/defect00_0002_red.png) ![Defect heatmap](/home/zeta/RINS_Project/reports/img/defects/heatmap00_0002_red.png) 
-
-
-ID 6 Anomaly Inspection Visuals:
-
-![Defect texture](/home/zeta/RINS_Project/reports/img/defects/defect01_0003_red.png) ![Defect heatmap](/home/zeta/RINS_Project/reports/img/defects/heatmap01_0003_red.png) 
-
-
-ID 7 Anomaly Inspection Visuals:
-
-![Defect texture](/home/zeta/RINS_Project/reports/img/defects/defect01_0004_red.png) ![Defect heatmap](/home/zeta/RINS_Project/reports/img/defects/heatmap01_0004_red.png) 
-
-
-ID 8 Anomaly Inspection Visuals:
-
-![Defect texture](/home/zeta/RINS_Project/reports/img/defects/defect01_0005_red.png) ![Defect heatmap](/home/zeta/RINS_Project/reports/img/defects/heatmap01_0005_red.png) 
 

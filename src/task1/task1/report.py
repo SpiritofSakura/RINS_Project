@@ -85,8 +85,9 @@ class ReportManager(Node):
 
         self.tiles_per_station = {}
         self._current_station = None
-        self._latest_warped = None
-        self._latest_heatmap = None
+        self._warped_cache = {}
+        self._heatmap_cache = {}
+        self._pending_defect = None
         self.bridge = CvBridge()
 
         self._ensure_dirs()
@@ -113,6 +114,7 @@ class ReportManager(Node):
         self.get_logger().info(
             f"ReportManager ready — reports: {self.pdf_dir}"
         )
+        self.create_timer(0.1, self._check_defect_timeout)
 
     def _ensure_dirs(self):
         for d in (self.pdf_dir, self.img_barrels_dir, self.img_defects_dir):
@@ -159,8 +161,9 @@ class ReportManager(Node):
         self._defect_image_seq = 0
         self.tiles_per_station = {}
         self._current_station = None
-        self._latest_warped = None
-        self._latest_heatmap = None
+        self._warped_cache = {}
+        self._heatmap_cache = {}
+        self._pending_defect = None
         self._ensure_dirs()
         self.get_logger().info("Reports cleared")
 
@@ -220,18 +223,33 @@ class ReportManager(Node):
 
     def _tile_warped_callback(self, msg: Image):
         try:
-            self._latest_warped = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            self._warped_cache[msg.header.frame_id] = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception:
             pass
+        self._trim_caches()
+        self._try_complete_defect()
 
     def _tile_heatmap_callback(self, msg: Image):
         try:
-            self._latest_heatmap = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            self._heatmap_cache[msg.header.frame_id] = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception:
             pass
+        self._trim_caches()
+        self._try_complete_defect()
+
+    def _trim_caches(self):
+        for cache in (self._warped_cache, self._heatmap_cache):
+            if len(cache) > 20:
+                for old in sorted(cache.keys()) [:-20]:
+                    del cache[old]
 
     def _tile_classification_callback(self, msg: String):
-        label = msg.data.strip()
+        raw = msg.data.strip()
+        if ":" in raw:
+            label, tile_id = raw.rsplit(":", 1)
+        else:
+            label = raw
+            tile_id = ""
         tiles = self._get_current_tiles()
         if not tiles:
             return
@@ -239,7 +257,7 @@ class ReportManager(Node):
         tile = tiles[-1]
         tile["status"] = label
         self.get_logger().info(
-            f"Tile #{tile['id']} [{self._current_station}]: {label}"
+            f"Tile #{tile['id']} [{self._current_station}] tid={tile_id}: {label}"
         )
 
         if label != "DEFECT":
@@ -249,19 +267,88 @@ class ReportManager(Node):
         seq = self._defect_image_seq
         self._defect_image_seq += 1
 
-        if self._latest_warped is not None:
-            self._ensure_dirs()
-            tex_name = f"defect{self.report_counter:02d}_{seq:04d}_{station}.png"
-            tex_path = os.path.join(self.img_defects_dir, tex_name)
-            cv2.imwrite(tex_path, self._latest_warped)
-            tile["texture_img"] = tex_path
+        self._ensure_dirs()
+        tex_name = f"defect{self.report_counter:02d}_{seq:04d}_{station}.png"
+        hm_name = f"heatmap{self.report_counter:02d}_{seq:04d}_{station}.png"
+        tex_path = os.path.join(self.img_defects_dir, tex_name)
+        hm_path = os.path.join(self.img_defects_dir, hm_name)
 
-        if self._latest_heatmap is not None:
-            self._ensure_dirs()
-            hm_name = f"heatmap{self.report_counter:02d}_{seq:04d}_{station}.png"
-            hm_path = os.path.join(self.img_defects_dir, hm_name)
-            cv2.imwrite(hm_path, self._latest_heatmap)
+        saved_tex = False
+        saved_hm = False
+
+        if tile_id and tile_id in self._warped_cache:
+            cv2.imwrite(tex_path, self._warped_cache[tile_id])
+            tile["texture_img"] = tex_path
+            saved_tex = True
+        elif not tile_id and self._warped_cache:
+            latest_key = sorted(self._warped_cache.keys())[-1]
+            cv2.imwrite(tex_path, self._warped_cache[latest_key])
+            tile["texture_img"] = tex_path
+            saved_tex = True
+
+        if tile_id and tile_id in self._heatmap_cache:
+            cv2.imwrite(hm_path, self._heatmap_cache[tile_id])
             tile["heatmap_img"] = hm_path
+            saved_hm = True
+        elif not tile_id and self._heatmap_cache:
+            latest_key = sorted(self._heatmap_cache.keys())[-1]
+            cv2.imwrite(hm_path, self._heatmap_cache[latest_key])
+            tile["heatmap_img"] = hm_path
+            saved_hm = True
+
+        if saved_tex and saved_hm:
+            return
+
+        self._pending_defect = {
+            "tile": tile,
+            "tile_id": tile_id,
+            "since": self.get_clock().now(),
+            "tex_path": tex_path,
+            "hm_path": hm_path,
+            "saved_tex": saved_tex,
+            "saved_hm": saved_hm,
+        }
+
+    def _try_complete_defect(self):
+        pending = self._pending_defect
+        if pending is None:
+            return
+
+        tile = pending["tile"]
+        tile_id = pending["tile_id"]
+
+        if not pending["saved_tex"]:
+            img = None
+            if tile_id and tile_id in self._warped_cache:
+                img = self._warped_cache[tile_id]
+            elif not tile_id and self._warped_cache:
+                img = self._warped_cache[sorted(self._warped_cache.keys())[-1]]
+            if img is not None:
+                cv2.imwrite(pending["tex_path"], img)
+                tile["texture_img"] = pending["tex_path"]
+                pending["saved_tex"] = True
+
+        if not pending["saved_hm"]:
+            img = None
+            if tile_id and tile_id in self._heatmap_cache:
+                img = self._heatmap_cache[tile_id]
+            elif not tile_id and self._heatmap_cache:
+                img = self._heatmap_cache[sorted(self._heatmap_cache.keys())[-1]]
+            if img is not None:
+                cv2.imwrite(pending["hm_path"], img)
+                tile["heatmap_img"] = pending["hm_path"]
+                pending["saved_hm"] = True
+
+        if pending["saved_tex"] and pending["saved_hm"]:
+            self._pending_defect = None
+
+    def _check_defect_timeout(self):
+        pending = self._pending_defect
+        if pending is None:
+            return
+        elapsed = (self.get_clock().now() - pending["since"]).nanoseconds / 1e9
+        if elapsed >= 2.0:
+            self._pending_defect = None
 
     def _generate_pdf(self, pdf_path, report_name):
         pdf = InspectionPDF(report_name)

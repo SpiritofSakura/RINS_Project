@@ -52,7 +52,7 @@ colcon build --packages-select task1 --merge-install
 - to get the waypoint manually write "get_red_waypoint" or "get_green_waypoint" to topic **/orchestrator_in**
 - response will be sent to topic **/orchestrator_out** with the waypoint (PoseStamped) and color of workstation in header.frame_id
 - the inspector node and its sub nodes are called dynamically when needed to avoid wasting resources - so when he gets that task from a person 
-- **this is my suggested flow - NOT IMPLEMENTED YET** - when person gives instruction to go to anomaly inspection, remember that in the orchestrator node, then just start the inspector node, wait a few seconds for it to inti and publish the correct message to /orchestrator_out based on given color from the human. The rest is aready implemented. This is how to open the inspector node from the orchestrator.
+- **this is my suggested flow - NOT IMPLEMENTED YET** - when person gives instruction to go to anomaly inspection, remember that in the orchestrator node, then just start the inspector node, wait a few seconds for it to inti and publish the correct message to /orchestrator_out based on given color from the human. The rest is aready implemented. This is how to open the inspector node from the orchestrator - make sure to run it in the "use_orchestrator:=true" mode
 ``` py
 from ament_index_python.packages import get_package_prefix                  
      _prefix = get_package_prefix("task1")                                       
@@ -84,6 +84,7 @@ subprocess.Popen(
 - for anomaly inspection, run ./workspace_marker.sh, this will publish the markers to the orchestrator - the orchestrator itself is responsible for running the inspection itself by calling station_inspector node.
 - similarly, other nodes that have similar functionality should also be put in ther respective launch files, like for instance ring detection nodes should be in a rins.launch.py file, similar for faces etc -- **NOT IMPLEMENTED YET**
 - for not crossing yellow line and follow blue line, i strongly suggest that we use the arm camera, because localisation will be too noisy
+- Tjas, when you will be making the waypoints, i suggest is sees the workstations for the first timefrom the left, so it will take less time for the inspector to set up his fine tuned position.
 
 ### Other useful commands
 ```bash
