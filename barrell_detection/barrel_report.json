@@ -1,3 +1,28 @@
 {
-  "barrels": []
+  "barrels": [
+    {
+      "id": 1,
+      "colour": "red",
+      "orientation": "vertical",
+      "leak_detected": false,
+      "position_map": [
+        -0.549,
+        0.613
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_1_161444.jpg",
+      "confirmed_at": "2026-05-25 16:14:44"
+    },
+    {
+      "id": 2,
+      "colour": "black",
+      "orientation": "vertical",
+      "leak_detected": false,
+      "position_map": [
+        1.456,
+        -1.278
+      ],
+      "image_path": "/home/zeta/RINS_Project/build/task1/task1/../../../barrell_detection/barrel_2_161541.jpg",
+      "confirmed_at": "2026-05-25 16:15:41"
+    }
+  ]
 }
