@@ -13,6 +13,7 @@ def generate_launch_description():
         name='detect_people',
         parameters=[
             {'enabled': True},
+            {'device': 'cuda'},
         ],
     )
     

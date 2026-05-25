@@ -98,11 +98,21 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     pass.setFilterLimits(x_limit_low, x_limit_high);
     pass.filter(*cloud_filtered);
 
-    pass.setInputCloud(cloud_filtered);    
+    pass.setInputCloud(cloud_filtered);
     pass.setFilterFieldName("z");
     pass.setFilterLimits(z_limit_low, z_limit_high);
     pass.filter(*cloud_filtered);
-    
+
+    // Downsample with a voxel grid to cut RANSAC load ~4x while preserving barrel geometry
+    {
+        pcl::VoxelGrid<PointT> vg;
+        vg.setInputCloud(cloud_filtered);
+        vg.setLeafSize(0.015f, 0.015f, 0.015f);
+        pcl::PointCloud<PointT>::Ptr cloud_ds(new pcl::PointCloud<PointT>);
+        vg.filter(*cloud_ds);
+        cloud_filtered = cloud_ds;
+    }
+
     if (verbose) {
         std::cerr << "PointCloud after filtering has: " << cloud_filtered->points.size() << " data points." << std::endl;
     }
@@ -136,7 +146,7 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     // Estimate point normals on plane-removed cloud
     ne.setSearchMethod(tree);
     ne.setInputCloud(cloud_filtered);
-    ne.setKSearch(50);
+    ne.setKSearch(20);
     ne.compute(*cloud_normals);
 
     // No axis constraint — allow vertical and horizontal cylinders
