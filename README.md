@@ -35,6 +35,152 @@ colcon build --packages-select task1 --merge-install
 
 ```
 
+
+# Blue Line Explorer -SpiritofSakura
+
+ROS2 node (`task1/blue_line_explorer.py`) that follows a blue floor line using a top-down camera, always choosing left at intersections.
+
+---
+
+## How It Works
+
+### 1. Color Detection
+
+Each frame from the top camera is converted to HSV. A mask is built from two combined methods:
+
+- **HSV range** — hue 82–102 (blue/cyan), saturation ≥ 120, value ≥ 60
+- **Cyan dominance check** — blue and green channels both ≥ 80, and both at least 40 above red
+
+The two masks are OR-ed together, then cleaned with morphological open+close to remove noise.
+
+The total number of lit pixels is compared against `min_blue_pixels` (150). Below that threshold the line is considered not visible.
+
+### 2. Centroid Steering (primary)
+
+The full-image blob centroid is computed with `cv2.moments`. The normalised horizontal error is:
+
+```
+cx_norm = (centroid_x - image_width/2) / (image_width/2)
+```
+
+`cx_norm = 0` means the line is centered, `+1` means far right, `−1` far left.
+
+The raw angular command is:
+
+```
+angular_raw = clamp(-kp * steer, -max_angular_speed, max_angular_speed)
+```
+
+An **EMA filter** (`angular_smoothing = 0.35`) prevents step-changes from causing jerks:
+
+```
+angular = alpha * angular_raw + (1 - alpha) * prev_angular
+```
+
+### 3. Direction ROIs (auxiliary)
+
+Three rectangular regions are checked for blue pixels to classify what's ahead:
+
+| Region   | X span       | Y span (of ROI height) |
+|----------|-------------|------------------------|
+| Left     | 0 – 33%     | 42 – 90%               |
+| Straight | 34 – 66%    | 20 – 65%               |
+| Right    | 67 – 100%   | 42 – 90%               |
+
+A region is "active" when it contains ≥ 50 pixels and ≥ 0.8% coverage. These fire independently of the centroid and drive two decisions:
+
+- **Speed**: fast (`0.40 m/s`) when only straight is active (clear corridor); slow (`0.15 m/s`) when split mode is active
+- **Left preference**: `left_bias` and the clamp described below
+
+### 4. Intersection Handling (`split_active` state machine)
+
+**Entering split mode** — any tick where left or right ROI fires sets `split_active = True`.
+
+**Steering at the intersection**:
+- If `"left" in directions` (genuine choice): `angular_raw = clamp(-kp * steer + left_bias, ...)`. The constant `left_bias = 0.25` adds a leftward nudge on top of the centroid, so the robot prefers the left branch.
+- If `"left"` is gone (robot has taken the turn, residual right pixels still visible): **pure centroid**, no bias. This is critical — applying the bias during re-centering fights the correction and keeps the robot off-center.
+- If neither `"left"` nor `"straight"` is visible (only a right-side residual): `steer = min(steer, 0.0)` clamps rightward pull to zero.
+
+**Exiting split mode** — the robot is considered re-centered when:
+- `"straight" in directions` AND `abs(cx_norm) < 0.30`
+- Held for `split_exit_hold = 0.5 s`
+
+Once the timer expires, `split_active` clears and the robot returns to fast straight-line speed.
+
+> **Why the exit timer resets only on `"left"`**: a residual right branch after the turn would otherwise restart the re-centering countdown every tick, keeping the robot in split mode forever. The exit timer is only cancelled when a genuine new left branch appears.
+
+### 5. Recovery (U-turn)
+
+- **Line lost**: if no line is detected for `line_lost_timeout = 2.0 s`, a U-turn starts.
+- **Bump**: if the bump sensor fires (`HazardDetectionVector`, type `BUMP`), a U-turn starts immediately.
+
+The U-turn rotates left at `uturn_angular_speed = 0.5 rad/s` for `uturn_duration = 6.5 s` (~180°), then enters SEARCH mode and slowly rotates left until the line reappears.
+
+---
+
+## State Machine
+
+```
+IDLE ──enable──► SEARCH ──line found──► FOLLOW ──line lost 2s──► UTURN ──done──► SEARCH
+                                           │                        ▲
+                                           └──bump──────────────────┘
+```
+
+States published on `/robot_state`: `BLUE_LINE_SEARCH`, `BLUE_LINE_FOLLOW`, `BLUE_LINE_DEAD_END`.
+
+---
+
+## Key Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `linear_speed` | 0.15 | Speed during split/intersection (m/s) |
+| `fast_linear_speed` | 0.40 | Speed on clear straight sections (m/s) |
+| `kp_steer` | 1.2 | Proportional gain on centroid error |
+| `max_angular_speed` | 0.7 | Angular clamp (rad/s) |
+| `left_bias` | 0.25 | Constant leftward offset at intersections (rad/s) |
+| `angular_smoothing` | 0.35 | EMA alpha (0 = frozen, 1 = no smoothing) |
+| `split_exit_hold` | 0.5 | Seconds of straight-zone hold before exiting split mode |
+| `min_blue_pixels` | 150 | Minimum pixels to consider line visible |
+| `line_lost_timeout` | 2.0 | Seconds before U-turn on line loss |
+| `uturn_duration` | 6.5 | Duration of U-turn rotation (s) |
+| `branch_roi_top_fraction` | 0.42 | Top of left/right ROI bands |
+| `branch_roi_bottom_fraction` | 0.90 | Bottom of left/right ROI bands |
+
+All parameters can be changed at runtime with `ros2 param set /blue_line_explorer <param> <value>`.
+
+---
+
+## Topics
+
+| Topic | Type | Direction | Purpose |
+|---|---|---|---|
+| `/top_camera/rgb/preview/image_raw` | `sensor_msgs/Image` | sub | Camera feed |
+| `/cmd_vel_unstamped` | `geometry_msgs/Twist` | pub | Drive commands |
+| `/blue_line_enabled` | `std_msgs/Bool` | sub | Enable/disable node |
+| `/patrol_finished` | `std_msgs/Bool` | sub | Auto-start trigger |
+| `/blue_line/debug_image` | `sensor_msgs/Image` | pub | Annotated debug view |
+| `/blue_line/status` | `std_msgs/String` | pub | Per-tick status string |
+| `/robot_state` | `std_msgs/String` | pub | State machine label |
+
+---
+
+## Quick Test
+
+```bash
+# From repo root — arm forward, debug view on
+./blue_line_test.sh qr
+
+# Check debug image in RViz or:
+ros2 run rqt_image_view rqt_image_view /blue_line/debug_image
+
+# Watch status
+ros2 topic echo /blue_line/status
+```
+
+The debug image shows the blue mask overlay, the centroid dot, the three ROI boxes (green = active), and a status line with current mode, pixel count, centroid error, and active directions.
+
+
 ## 3stan tips for others to jumpstart
 
 ### The inspector and integration 
