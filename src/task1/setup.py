@@ -38,6 +38,7 @@ setup(
             'cylinder_debug_view = task1.cylinder_debug_view:main',
             'color_mask_viewer = task1.color_mask_viewer:main',
             'line_localizator = task1.line_localizator:main',
+            'blue_line_explorer = task1.blue_line_explorer:main',
             'workstation_recorder = task1.workstation_recorder:main',
             'station_inspector = task1.station_inspector:main',
             'parallel_align = task1.parallel_align:main',

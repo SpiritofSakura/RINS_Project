@@ -74,6 +74,13 @@ def generate_launch_description():
         name='waypoint_navigator',
     )
 
+    blue_line_explorer_node = Node(
+        package='task1',
+        executable='blue_line_explorer',
+        name='blue_line_explorer',
+        output='screen',
+    )
+
     robot_state_overlay_node = Node(
         package='task1',
         executable='robot_state_overlay',
@@ -117,6 +124,7 @@ def generate_launch_description():
         robot_state_overlay_node,
         behavior_manager_node,
         waypoint_navigator_node,
+        blue_line_explorer_node,
         delayed_detect_rings,
         delayed_ring_localizator,
         delayed_cylinder_segmentation,

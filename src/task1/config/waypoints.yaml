@@ -1,66 +1,79 @@
 waypoints:
 
-# 1
-- x: 1.7
-  y: 0.1
-  yaw: -2.3562
+# Yellow-room-only patrol for map2.yaml.
+# Same-position entries with different yaw values are intentional in-place rotations.
+# yaw values: east=0.0, north=1.5708, west=3.1416, south=-1.5708.
 
-# 2
-- x: 2.3
-  y: -2.2
-  yaw: 2.3562
+# START / left-side scan
+- x: -4.60
+  y: -1.10
+  yaw: 0.0
 
-# 3
-- x: 1.3
-  y: -3.5
-  yaw: 0
-
-# 4
-- x: 0
-  y: -2
-  yaw: -0.8
-
-# 5
-- x: -2.4
-  y: -1.25
-  yaw: -0.8
-
-# 6
-- x: -2.6
-  y: 2.2
-  yaw: -0.8
-
-# 7
-- x: -0.6
-  y: 2.5
-  yaw: -2.7
-
-  # 7.5
-- x: -1
-  y: 2.5
-  yaw: -2.6
-
-# 8
-- x: 0.5
-  y: 2.6
-  yaw: -2.35
-
-# 9
-- x: 0.5
-  y: 0.5
-  yaw: -1.9
-
-# 10
-- x: 0
-  y: 1
+- x: -4.60
+  y: -1.10
   yaw: 1.5708
 
-# 11
-- x: -1.2
-  y: 1
-  yaw: -0.7
+- x: -4.60
+  y: -1.10
+  yaw: 3.1416
 
-# 12
-- x: -2.2
-  y: 0.6
-  yaw: -2.3562
+- x: -4.60
+  y: -1.10
+  yaw: -1.5708
+
+# Lower-left room sweep
+- x: -3.80
+  y: -3.60
+  yaw: -1.5708
+
+# Bottom yellow boundary sweep
+- x: -3.20
+  y: -7.00
+  yaw: 0.0
+
+- x: 0.40
+  y: -7.00
+  yaw: 1.5708
+
+# Lower-right / center scan
+- x: -0.80
+  y: -3.60
+  yaw: 0.0
+
+- x: -0.80
+  y: -3.60
+  yaw: 1.5708
+
+- x: -0.80
+  y: -3.60
+  yaw: 3.1416
+
+- x: -0.80
+  y: -3.60
+  yaw: -1.5708
+
+# Middle room scan
+- x: -2.60
+  y: -0.70
+  yaw: 0.0
+
+- x: -2.60
+  y: -0.70
+  yaw: 1.5708
+
+- x: -2.60
+  y: -0.70
+  yaw: 3.1416
+
+- x: -2.60
+  y: -0.70
+  yaw: -1.5708
+
+# Upper/right side of the yellow room, then finish near the top-left side
+- x: 0.40
+  y: 0.00
+  yaw: 3.1416
+
+- x: -4.40
+  y: 0.00
+  yaw: 3.1416

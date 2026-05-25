@@ -25,6 +25,10 @@ DOVOLJENA_STANJA = {
     'TILE_FOUND',
     'MOVE_NEXT',
     'FINISHED',
+    'BLUE_LINE_SEARCH',
+    'BLUE_LINE_FOLLOW',
+    'BLUE_LINE_INTERSECTION',
+    'BLUE_LINE_DEAD_END',
 }
 
 
@@ -175,6 +179,13 @@ class RobotStateOverlay(Node):
             bar.r = 0.0
             bar.g = 1.0
             bar.b = 0.5
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje.startswith('BLUE_LINE_'):
+            bar.r = 0.1
+            bar.g = 0.7
+            bar.b = 1.0
             bar.a = 1.0
             return bar
 

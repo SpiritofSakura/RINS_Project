@@ -52,6 +52,13 @@ def generate_launch_description():
         output="screen",
     )
 
+    blue_line_explorer_node = Node(
+        package="task1",
+        executable="blue_line_explorer",
+        name="blue_line_explorer",
+        output="screen",
+    )
+
     ld = LaunchDescription([
         arm_camera_viewer_node,
         behavior_manager_node,
@@ -60,6 +67,7 @@ def generate_launch_description():
         report_node,
         overlay_node,
         waypoint_navigator_node,
+        blue_line_explorer_node,
     ])
 
     return ld
