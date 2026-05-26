@@ -1,0 +1,66 @@
+# Yellow line forbidden-zone definitions — world frame coordinates (metres).
+#
+# HOW TO FIND COORDINATES
+# -----------------------
+# 1. Launch the sim and open RViz.
+# 2. In RViz toolbar select the "Publish Point" tool (crosshair icon).
+# 3. Run:  ros2 topic echo /clicked_point
+# 4. Click each corner of a yellow line in RViz -> note the x/y values printed.
+# 5. Fill them in below, then run:  python3 make_yellow_layer.py
+
+yellow_polygons:
+
+yellow_lines:
+  line_1:
+    width_m: 0.15
+    points:
+      - [ 3.62,  0.68]
+      - [ 3.73, -0.88]
+
+  line_2:
+    width_m: 0.15
+    points:
+      - [ 3.71,  0.73]
+      - [-4.91,  0.77]
+
+  line_3:
+    width_m: 0.15
+    points:
+      - [-4.86, -2.87]
+      - [-3.88, -2.93]
+
+  line_4:
+    width_m: 0.15
+    points:
+      - [-2.81, -3.81]
+      - [-2.86, -4.90]
+
+  line_5:
+    width_m: 0.15
+    points:
+    - [-2.05, -4.95]
+    - [ 0.48, -4.90]
+
+  line_6:
+    width_m: 0.15
+    points:
+      - [ 1.57, -4.81]
+      - [ 1.58, -0.99]
+
+  line_7:
+    width_m: 0.15
+    points:
+      - [ 2.15, -0.98]
+      - [-0.40, -1.42]
+
+  line_8:
+    width_m: 0.15
+    points:
+      - [ 0.48, -1.40]
+      - [ 0.52, -2.47]
+
+  line_9:
+    width_m: 0.15
+    points:
+      - [-1.94, -1.38]
+      - [-2.77, -1.42]

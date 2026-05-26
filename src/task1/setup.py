@@ -49,6 +49,7 @@ setup(
             'tile_classifier = task1.tile_classifier:main',
             'report_manager = task1.report:main',
             'orchestrator = task1.orchestrator:main',
+            'yellow_line_avoider = task1.yellow_line_avoider:main',
         ],
     },
 )
