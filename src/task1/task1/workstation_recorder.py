@@ -166,6 +166,11 @@ class WorkstationRecorder(Node):
         if map_p1 is None or map_p2 is None:
             return
 
+        # Reject short segments — barrels produce ~0.2 m markers, workspace lines are 2 m+
+        line_length = float(np.linalg.norm(map_p2[:2] - map_p1[:2]))
+        if line_length < 1.5:
+            return
+
         dx = robot_xy[0] - map_center[0]
         dy = robot_xy[1] - map_center[1]
         robot_dist = math.hypot(dx, dy)
