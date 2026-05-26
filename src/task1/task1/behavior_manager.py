@@ -508,6 +508,7 @@ class BehaviorManager(Node):
         return self.current_state in (
             'PATROL',
             'IDLE',
+            'MANUAL_CONTROL',
             'APPROACH_FACE',
             'INTERACT_FACE',
             'APPROACH_RING',
@@ -658,7 +659,7 @@ class BehaviorManager(Node):
         self.approach_start_time = None  # Reset timer when goal is cancelled
 
     def refresh_state(self, force_publish=False):
-        if self.manual_control_active:
+        if self.manual_control_active and self.active_target is None:
             self.publish_patrol_enabled(False)
             self.publish_state('MANUAL_CONTROL', force_publish)
             return
@@ -853,7 +854,7 @@ class BehaviorManager(Node):
     def manual_control_callback(self, msg: Bool):
         self.manual_control_active = msg.data
 
-        if self.manual_control_active and self.goal_active:
+        if self.manual_control_active and self.goal_active and self.nav_goal_type != 'approach_barrel':
             self.cancel_temporary_goal()
 
         if self.manual_control_active:

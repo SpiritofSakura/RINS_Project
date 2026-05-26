@@ -34,8 +34,8 @@ std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
 typedef pcl::PointXYZRGB PointT;
 
 // parameters
-float error_margin = 0.025; // tight radius margin — reduces wall-corner false positives
-float target_radius = 0.11; // 11cm radius
+float error_margin = 0.04;
+float target_radius = 0.14; // ~14cm radius (Gazebo barrel)
 bool verbose = false;
 
 // cloud filtering
@@ -53,7 +53,7 @@ float marker_height = 0.4;
 int max_detected_cylinders = 12;
 int min_cylinder_size = 220;
 float min_z_spread = 0.07f;   // reject flat objects (floor markings) — real cylinders span >7cm vertically
-float max_z_spread = 0.50f;   // reject tall objects (boxes, walls) — barrels are at most ~40cm tall
+float max_z_spread = 0.70f;   // Gazebo barrel is ~60cm visible height
 float min_horizontal_axis_z = -0.30f; // reject horizontal detections whose axis center is at floor level (curbs etc.)
 float min_saturation = 0.22f; // HSV saturation threshold — rejects grey/beige boxes; black barrels pass via value check
 float max_value_for_black = 0.25f; // brightness ceiling — allows black barrels to bypass saturation check
@@ -143,6 +143,10 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         }
     }
 
+    if (verbose) {
+        std::cerr << "[FILTER] pts after plane removal: " << cloud_filtered->size() << std::endl;
+    }
+
     // Estimate point normals on plane-removed cloud
     ne.setSearchMethod(tree);
     ne.setInputCloud(cloud_filtered);
@@ -197,6 +201,13 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         float detected_radius = coefficients_cylinder->values[6];
         int cylinder_points_count = inliers_cylinder->indices.size();
 
+        if (verbose) {
+            std::cerr << "[RANSAC] radius=" << detected_radius
+                      << " pts=" << cylinder_points_count
+                      << " (need r=" << target_radius << "±" << error_margin
+                      << " pts>=" << min_cylinder_size << ")" << std::endl;
+        }
+
         // Classify orientation from axis direction (values[3..5])
         float ax = coefficients_cylinder->values[3];
         float ay = coefficients_cylinder->values[4];
@@ -224,7 +235,7 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         point_camera.point.z = marker_height;
 
         try {
-            auto tss = tf_buffer_->lookupTransform(toFrameRel, fromFrameRel, now);
+            auto tss = tf_buffer_->lookupTransform(toFrameRel, fromFrameRel, rclcpp::Time(0));
             tf2::doTransform(point_camera, point_map, tss);
         } catch (tf2::TransformException& ex) {
             std::cout << ex.what() << std::endl;
@@ -239,6 +250,11 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
             if (pt.z > z_max) z_max = pt.z;
         }
         float z_spread = z_max - z_min;
+
+        if (verbose) {
+            std::cerr << "[RANSAC] z_spread=" << z_spread
+                      << " (need " << min_z_spread << ".." << max_z_spread << ")" << std::endl;
+        }
 
         // For horizontal detections, reject if axis center is at floor level (curbs, ledges)
         float axis_center_z = coefficients_cylinder->values[2];
@@ -316,7 +332,7 @@ void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
             // Encode orientation in marker.text — read by cylinder_localizator
             marker.text = is_vertical ? "vertical" : "horizontal";
 
-            marker.lifetime = rclcpp::Duration(0, 1);
+            marker.lifetime = rclcpp::Duration(2, 0);
 
             marker_pub->publish(marker);
 

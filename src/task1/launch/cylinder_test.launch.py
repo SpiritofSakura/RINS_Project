@@ -31,6 +31,7 @@ def generate_launch_description():
         executable='cylinder_debug_view',
         name='cylinder_debug_view',
         output='screen',
+        parameters=[{'show_windows': True}],
     )
 
     ld = LaunchDescription([

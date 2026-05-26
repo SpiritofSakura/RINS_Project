@@ -38,6 +38,14 @@ def generate_launch_description():
         output='screen',
     )
 
+    cylinder_debug_view_node = Node(
+        package='task1',
+        executable='cylinder_debug_view',
+        name='cylinder_debug_view',
+        output='screen',
+        parameters=[{'show_windows': True}],
+    )
+
 
     # Nodes from task1 package
     face_localizator_node = Node(
@@ -110,6 +118,11 @@ def generate_launch_description():
         actions=[cylinder_localizator_node],
     )
 
+    delayed_cylinder_debug_view = TimerAction(
+        period=6.0,
+        actions=[cylinder_debug_view_node],
+    )
+
     orchestrator_node = Node(
         package='task1',
         executable='orchestrator',
@@ -130,6 +143,7 @@ def generate_launch_description():
         delayed_ring_localizator,
         delayed_cylinder_segmentation,
         delayed_cylinder_localizator,
+        delayed_cylinder_debug_view,
         orchestrator_node,
     ])
     

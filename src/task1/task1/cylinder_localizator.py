@@ -34,7 +34,8 @@ CLUSTER_RADIUS_H    = 0.65  # m — horizontal/front-facing cylinders vary more
 FAIR_THRESH         = 4     # detections before showing a temporary candidate marker
 CONFIRM_THRESH      = 10    # detections before confirming
 MIN_MARK_DIST       = 0.18  # m — physical overlap guard; touching barrels are ~0.22 m apart
-SAME_COLOUR_SUPPRESS_RADIUS = 0.75
+SAME_COLOUR_SUPPRESS_RADIUS   = 0.75
+SAME_COLOUR_SUPPRESS_RADIUS_H = 1.5   # horizontal barrels: centroid varies more with viewing angle
 COMPACT_INLIER_RADIUS = 0.32
 MAX_RAW_PTS         = 300
 
@@ -204,6 +205,8 @@ class CylinderLocalizator(Node):
         self.cluster_id_counter = 0
         self.confirmed_markers = {}
 
+        self.create_timer(2.0, self._republish_confirmed_markers)
+
         # Spill check state machine
         self._spill_queue: list[tuple] = []  # (barrel_id, colour)
         self._spill_state = "idle"           # idle → moving → capturing → returning
@@ -305,8 +308,9 @@ class CylinderLocalizator(Node):
             if d < MIN_MARK_DIST:
                 cluster.confirmed = True
                 return
+            suppress_r = SAME_COLOUR_SUPPRESS_RADIUS_H if orientation == "horizontal" else SAME_COLOUR_SUPPRESS_RADIUS
             if (
-                d < SAME_COLOUR_SUPPRESS_RADIUS
+                d < suppress_r
                 and c.best_orientation == orientation
                 and _colours_compatible(c.best_colour, colour)
             ):
@@ -562,6 +566,7 @@ class CylinderLocalizator(Node):
                 "z": z,
                 "colour": colour,
                 "orientation": orientation,
+                "leak_detected": leak_detected,
             }
             self._publish_condition_label(int(barrel_id), x, y, z, leak_detected)
 
@@ -602,6 +607,15 @@ class CylinderLocalizator(Node):
             label.color.b = 0.1
 
         self.cylinder_locations_pub.publish(label)
+
+
+    def _republish_confirmed_markers(self):
+        for barrel_id, info in self.confirmed_markers.items():
+            self._publish_marker(
+                barrel_id, info["x"], info["y"], info["z"],
+                info["colour"], info["orientation"],
+                confirmed=True, leak_detected=info.get("leak_detected"),
+            )
 
 
 def main():
