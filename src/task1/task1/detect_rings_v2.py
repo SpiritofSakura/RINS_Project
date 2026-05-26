@@ -544,10 +544,6 @@ class RingDetectorV2(Node):
         if self.robot_state not in ['IDLE', 'PATROL']:
             return
 
-        # Skip publishing if turning too fast (motion blur)
-        if abs(self.turning_speed) > 0.2:
-            return
-
         if self.image_header is None:
             return
 

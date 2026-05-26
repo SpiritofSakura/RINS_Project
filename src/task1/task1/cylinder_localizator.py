@@ -27,7 +27,7 @@ from visualization_msgs.msg import Marker
 import tf2_ros
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-CLUSTER_RADIUS      = 0.40  # m — stable merge radius for repeated sightings
+CLUSTER_RADIUS      = 0.30  # m — stable merge radius for repeated sightings
 CLUSTER_RADIUS_H    = 0.65  # m — horizontal/front-facing cylinders vary more
 FAIR_THRESH         = 4     # detections before showing a temporary candidate marker
 CONFIRM_THRESH      = 10    # detections before confirming

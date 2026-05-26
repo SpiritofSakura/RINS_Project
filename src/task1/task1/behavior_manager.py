@@ -506,17 +506,11 @@ class BehaviorManager(Node):
         return self.pending_match_threshold.get(target_type, 0.35)
 
     def accepts_new_detections(self):
-        return self.current_state in (
-            'PATROL',
-            'IDLE',
-            'MANUAL_CONTROL',
-            'APPROACH_FACE',
-            'INTERACT_FACE',
-            'APPROACH_RING',
-            'INTERACT_RING',
-            'APPROACH_BARREL',
-            'INTERACT_BARREL',
-        )
+        return self.current_state == 'PATROL'
+
+    def accepts_face_detections(self):
+        # Faces also scan during approach/interact so recognition continues while closing in
+        return self.current_state in ('PATROL', 'APPROACH_FACE', 'INTERACT_FACE')
 
     def is_active_target_match(self, target_type, x, y, color=None):
         if self.active_target is None:
@@ -763,7 +757,7 @@ class BehaviorManager(Node):
         return True
 
     def face_callback(self, msg: Marker):
-        if not self.accepts_new_detections():
+        if not self.accepts_face_detections():
             return
 
         if msg.ns and msg.ns != 'face_confirmed':
