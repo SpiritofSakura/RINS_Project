@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Analyse a thin Z-slice above ground: distance + colour check + RViz output."""
+"""Point cloud spill analysis service — call /pointcloud_viewer/spill_check."""
+
+import json
 
 import numpy as np
 
@@ -9,16 +11,17 @@ from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2 as pc2
 from std_msgs.msg import Header
+from std_srvs.srv import Trigger
 import tf2_ros
 
 
-DIST_MAX     = 1.0    # m — ignore points further than this from camera
-SLICE_Z_MIN  = 0.005   # m above ground (map frame)
-SLICE_Z_MAX  = 0.03    # m above ground (map frame)
-GRAY_THRESH  = 30     # max(r,g,b) - min(r,g,b) below this = gray
+DIST_MAX            = 1.0   # m — ignore points further from camera
+SLICE_Z_MIN         = 0.005 # m above ground (map frame)
+SLICE_Z_MAX         = 0.15  # m above ground (map frame)
+SPILL_POINT_THRESH  = 4000  # min points in Z-slice → spill
 
 
-class PointCloudViewer(Node):
+class PointCloudSpillCheck(Node):
     def __init__(self):
         super().__init__("pointcloud_viewer")
 
@@ -26,56 +29,68 @@ class PointCloudViewer(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.latest_cloud = None
 
-        self.sub = self.create_subscription(
+        self.create_subscription(
             PointCloud2, "/oakd/rgb/preview/depth/points",
             self._cloud_cb, 1
         )
         self.slice_pub = self.create_publisher(PointCloud2, "/slice_points", 10)
-        self.create_timer(1.0, self._timer_cb)
+        self.srv = self.create_service(Trigger, "spill_check", self._spill_check_cb)
 
-        self.get_logger().info("PointCloud viewer ready — view /slice_points in RViz.")
+        self.get_logger().info(f"Ready — slice [{SLICE_Z_MIN}, {SLICE_Z_MAX}]  threshold={SPILL_POINT_THRESH}")
 
-    def _cloud_cb(self, msg: PointCloud2):
+    def _cloud_cb(self, msg):
         self.latest_cloud = msg
 
-    def _timer_cb(self):
+    def _spill_check_cb(self, _request, response):
         if self.latest_cloud is None:
-            return
+            response.success = False
+            response.message = json.dumps(
+                {"point_count": 0, "spill_detected": None, "error": "no point cloud received yet"}
+            )
+            return response
+
         cloud = self.latest_cloud
 
-        # --- 1. read raw points (sensor frame) ---
+        # --- 1. read raw points ---
         try:
             structured = pc2.read_points(
                 cloud, field_names=("x", "y", "z", "rgb"), skip_nans=True
             )
-        except Exception:
-            return
+        except Exception as e:
+            response.success = False
+            response.message = json.dumps({"point_count": 0, "spill_detected": None, "error": str(e)})
+            return response
+
         if len(structured) == 0:
-            return
+            response.success = False
+            response.message = json.dumps({"point_count": 0, "spill_detected": None, "error": "empty cloud"})
+            return response
 
         # --- 2. distance filter (sensor frame) ---
-        xs = structured["x"]
-        ys = structured["y"]
-        zs = structured["z"]
+        xs = structured["x"].astype(np.float64)
+        ys = structured["y"].astype(np.float64)
+        zs = structured["z"].astype(np.float64)
         dists = np.sqrt(xs**2 + ys**2 + zs**2)
         near_mask = dists <= DIST_MAX
         if near_mask.sum() == 0:
-            return
+            response.success = True
+            response.message = json.dumps({"point_count": 0, "spill_detected": False})
+            return response
 
-        xs_near = xs[near_mask].astype(np.float64)
-        ys_near = ys[near_mask].astype(np.float64)
-        zs_near = zs[near_mask].astype(np.float64)
-        rgb_near = np.asarray(structured["rgb"][near_mask], dtype=np.uint32)
+        xs_near = xs[near_mask]
+        ys_near = ys[near_mask]
+        zs_near = zs[near_mask]
 
-        # --- 3. transform near points to map frame ---
+        # --- 3. transform to map frame ---
         try:
             tf = self.tf_buffer.lookup_transform(
                 "map", cloud.header.frame_id, rclpy.time.Time(),
                 timeout=Duration(seconds=0.1),
             )
         except tf2_ros.TransformException as e:
-            self.get_logger().warn(f"TF lookup failed: {e}")
-            return
+            response.success = False
+            response.message = json.dumps({"point_count": 0, "spill_detected": None, "error": str(e)})
+            return response
 
         t = tf.transform.translation
         q = tf.transform.rotation
@@ -85,57 +100,43 @@ class PointCloudViewer(Node):
         rotated = np.dot(pts, np.array(R).T)
         transformed = rotated + np.array([t.x, t.y, t.z])
 
-        # --- 4. Z-slice filter (map frame) ---
+        # --- 4. Z-slice filter ---
         z = transformed[:, 2]
         slice_mask = (z >= SLICE_Z_MIN) & (z <= SLICE_Z_MAX)
-        slice_count = slice_mask.sum()
-
-        if slice_count == 0:
-            self.get_logger().info(
-                f"Slice [{SLICE_Z_MIN:.2f}, {SLICE_Z_MAX:.2f}]m @ ≤{DIST_MAX}m: 0 pts"
-            )
-            return
-
-        # --- 5. colour analysis ---
-        slice_rgb = np.array(rgb_near[slice_mask], dtype=np.uint32)
-        r = ((slice_rgb >> 16) & 0xFF).astype(np.uint8)
-        g = ((slice_rgb >> 8) & 0xFF).astype(np.uint8)
-        b = (slice_rgb & 0xFF).astype(np.uint8)
-
-        rg = r.astype(np.int16) - g.astype(np.int16)
-        rb = r.astype(np.int16) - b.astype(np.int16)
-        gb = g.astype(np.int16) - b.astype(np.int16)
-        max_diff = np.maximum(np.abs(rg), np.maximum(np.abs(rb), np.abs(gb)))
-        is_colourful = max_diff >= GRAY_THRESH
-        is_black = np.maximum(np.maximum(r, g), b) < 50
-        non_gray = (is_colourful | is_black).sum()
-        pct = 100.0 * non_gray / slice_count
+        count = int(slice_mask.sum())
+        spill_detected = count >= SPILL_POINT_THRESH
 
         self.get_logger().info(
-            f"Slice [{SLICE_Z_MIN:.2f}, {SLICE_Z_MAX:.2f}]m @ ≤{DIST_MAX}m: "
-            f"{slice_count} pts, {non_gray} non-gray ({pct:.1f}%)"
+            f"[{SLICE_Z_MIN}, {SLICE_Z_MAX}] - {count} points - {SPILL_POINT_THRESH} threshold - "
+            f"{'SPILL' if spill_detected else 'OK'}"
         )
 
-        # --- 6. publish slice as PointCloud2 (map frame, with RGB) ---
-        slice_xyz = transformed[slice_mask]
-        points_with_rgb = [
-            (float(x), float(y), float(z), int(rgb))
-            for x, y, z, rgb in zip(
-                slice_xyz[:, 0], slice_xyz[:, 1], slice_xyz[:, 2], slice_rgb
-            )
-        ]
+        # --- 5. publish slice for RViz ---
+        if count > 0:
+            slice_xyz = transformed[slice_mask]
+            rgb = np.asarray(structured["rgb"][near_mask], dtype=np.uint32)[slice_mask]
+            header = Header()
+            header.stamp = self.get_clock().now().to_msg()
+            header.frame_id = "map"
+            fields = [
+                PointField(name="x", offset=0,  datatype=PointField.FLOAT32, count=1),
+                PointField(name="y", offset=4,  datatype=PointField.FLOAT32, count=1),
+                PointField(name="z", offset=8,  datatype=PointField.FLOAT32, count=1),
+                PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
+            ]
+            points_with_rgb = [
+                (float(x), float(y), float(z), int(c))
+                for x, y, z, c in zip(slice_xyz[:, 0], slice_xyz[:, 1], slice_xyz[:, 2], rgb)
+            ]
+            msg = pc2.create_cloud(header, fields, points_with_rgb)
+            self.slice_pub.publish(msg)
 
-        header = Header()
-        header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = "map"
-        fields = [
-            PointField(name="x", offset=0,  datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4,  datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8,  datatype=PointField.FLOAT32, count=1),
-            PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
-        ]
-        msg = pc2.create_cloud(header, fields, points_with_rgb)
-        self.slice_pub.publish(msg)
+        response.success = True
+        response.message = json.dumps({
+            "point_count": count,
+            "spill_detected": spill_detected,
+        })
+        return response
 
     @staticmethod
     def _quat_to_mat(qx, qy, qz, qw):
@@ -148,7 +149,7 @@ class PointCloudViewer(Node):
 
 def main():
     rclpy.init()
-    node = PointCloudViewer()
+    node = PointCloudSpillCheck()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

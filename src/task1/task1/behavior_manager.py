@@ -15,6 +15,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import Bool, String, Empty
+from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker
 
 
@@ -163,13 +164,8 @@ class BehaviorManager(Node):
             10
         )
 
-        self.start_spill_pub = self.create_publisher(Empty, '/start_spill_check', 1)
-        self.spill_done_subscriber = self.create_subscription(
-            Empty, '/spill_check_done', self._spill_done_cb, 10
-        )
-        self.barrel_result_subscriber = self.create_subscription(
-            String, '/barrel_inspection_result', self._barrel_result_cb, 10
-        )
+        self.spill_check_client = self.create_client(Trigger, '/spill_check')
+        self._pending_spill_future = None
 
         self.amcl_pose_subscriber = self.create_subscription(
             PoseWithCovarianceStamped,
@@ -316,29 +312,7 @@ class BehaviorManager(Node):
         self.spill_check_start_time = None
         self.target_done_callback(Empty())
 
-    def _spill_done_cb(self, _msg: Empty):
-        if self.waiting_for_spill_check:
-            self.get_logger().info('Spill check done — starting barrel interaction.')
-            self.waiting_for_spill_check = False
-            self.spill_check_start_time = None
-            self.start_interaction()
 
-    def _barrel_result_cb(self, msg: String):
-        try:
-            data = json.loads(msg.data)
-        except json.JSONDecodeError:
-            self.get_logger().warn(f'Invalid barrel inspection result: {msg.data}')
-            return
-
-        if self.active_target is None or self.active_target.get('type') != 'barrel':
-            return
-
-        barrel_id = data.get('barrel_id')
-        if barrel_id is not None and self.active_target.get('barrel_id') not in (None, barrel_id):
-            return
-
-        self.active_target['leak_detected'] = data.get('leak_detected')
-        self.active_target['spill_point_count'] = data.get('spill_point_count', 0)
 
     def main_loop(self):
         if not self.nav_server_ready:
@@ -374,12 +348,37 @@ class BehaviorManager(Node):
 
         # While waiting for the spill check to finish, hold here and check for timeout
         if self.waiting_for_spill_check:
-            if self.spill_check_start_time is not None:
+            if self._pending_spill_future is not None and self._pending_spill_future.done():
+                try:
+                    response = self._pending_spill_future.result()
+                    if response.success:
+                        data = json.loads(response.message)
+                        self.active_target['leak_detected'] = data.get('spill_detected')
+                        self.active_target['spill_point_count'] = data.get('point_count', 0)
+                        self.get_logger().info(
+                            f"Spill check: {data.get('point_count', 0)} pts → "
+                            f"{'SPILL' if data.get('spill_detected') else 'OK'}"
+                        )
+                    else:
+                        err = json.loads(response.message).get('error', 'unknown')
+                        self.get_logger().warn(f'Spill check failed: {err}')
+                        if self.active_target is not None:
+                            self.active_target['leak_detected'] = None
+                except Exception as e:
+                    self.get_logger().warn(f'Spill check error: {e}')
+                    if self.active_target is not None:
+                        self.active_target['leak_detected'] = None
+                self.waiting_for_spill_check = False
+                self.spill_check_start_time = None
+                self._pending_spill_future = None
+                self.start_interaction()
+            elif self.spill_check_start_time is not None:
                 elapsed = (self.get_clock().now().nanoseconds - self.spill_check_start_time) / 1e9
                 if elapsed >= self.spill_check_timeout:
                     self.get_logger().warn('Spill check timed out — speaking inconclusive result.')
                     self.waiting_for_spill_check = False
                     self.spill_check_start_time = None
+                    self._pending_spill_future = None
                     if self.active_target is not None:
                         self.active_target['leak_detected'] = None
                     self.start_interaction()
@@ -404,10 +403,11 @@ class BehaviorManager(Node):
                     else:  # APPROACH_RING
                         self.publish_state('INTERACT_RING')
                     if self.current_state == 'INTERACT_BARREL' and self.active_target is not None and self.active_target.get('is_horizontal', False):
-                        self.get_logger().info('Horizontal barrel (timeout path) — waiting for spill check.')
+                        self.get_logger().info('Horizontal barrel (timeout path) — calling spill check service.')
                         self.waiting_for_spill_check = True
                         self.spill_check_start_time = self.get_clock().now().nanoseconds
-                        self.start_spill_pub.publish(Empty())
+                        req = Trigger.Request()
+                        self._pending_spill_future = self.spill_check_client.call_async(req)
                     else:
                         self.start_interaction()
                     # Do NOT return - let normal interaction logic proceed
@@ -448,10 +448,11 @@ class BehaviorManager(Node):
                 self.publish_state('INTERACT_BARREL')
                 self.get_logger().info('Reached barrel target. Starting interaction.')
                 if self.active_target is not None and self.active_target.get('is_horizontal', False):
-                    self.get_logger().info('Horizontal barrel — waiting for spill check.')
+                    self.get_logger().info('Horizontal barrel — calling spill check service.')
                     self.waiting_for_spill_check = True
                     self.spill_check_start_time = self.get_clock().now().nanoseconds
-                    self.start_spill_pub.publish(Empty())
+                    req = Trigger.Request()
+                    self._pending_spill_future = self.spill_check_client.call_async(req)
                 else:
                     self.start_interaction()
 

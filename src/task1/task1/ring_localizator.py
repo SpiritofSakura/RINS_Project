@@ -11,6 +11,7 @@ from rclpy.qos import qos_profile_sensor_data, QoSProfile, QoSReliabilityPolicy,
 from rclpy.duration import Duration
 
 from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
 from std_msgs.msg import String
 import tf2_ros
 import math
@@ -268,7 +269,7 @@ class RingLocalizator(Node):
         marker.header.frame_id = "map"
         marker.header.stamp    = self.get_clock().now().to_msg()
         marker.ns              = status
-        marker.type            = Marker.SPHERE
+        marker.type            = Marker.LINE_STRIP
         marker.id              = int(marker_id) if marker_id is not None else self.marker_id_counter
         if marker_id is None:
             self.marker_id_counter += 1
@@ -280,16 +281,16 @@ class RingLocalizator(Node):
         marker.pose.orientation.w = 1.0
 
         if confirmed:
-            marker.scale.x = marker.scale.y = 0.35
-            marker.scale.z = 0.10
+            radius = 0.175
+            marker.scale.x = 0.030
             marker.color.a = 1.0
         elif actionable:
-            marker.scale.x = marker.scale.y = 0.30
-            marker.scale.z = 0.08
+            radius = 0.150
+            marker.scale.x = 0.025
             marker.color.a = 0.85
         else:
-            marker.scale.x = marker.scale.y = 0.22
-            marker.scale.z = 0.06
+            radius = 0.110
+            marker.scale.x = 0.020
             marker.color.a = 0.45
             marker.lifetime.sec = 0
             marker.lifetime.nanosec = 700_000_000
@@ -297,7 +298,16 @@ class RingLocalizator(Node):
         marker.color.r, marker.color.g, marker.color.b = r, g, b
         marker.text = status.replace("ring_", "")
         # No lifetime for confirmed rings; candidates are refreshed while visible.
-        
+
+        n = 36
+        for i in range(n + 1):
+            a = 2.0 * math.pi * i / n
+            p = Point()
+            p.x = radius * math.cos(a)
+            p.y = radius * math.sin(a)
+            p.z = 0.0
+            marker.points.append(p)
+
         self.ring_locations_pub.publish(marker)
 
     # ──────────────────────────────────────────────────────────────────────────

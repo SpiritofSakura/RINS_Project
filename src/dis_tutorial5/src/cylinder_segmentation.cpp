@@ -15,6 +15,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 #include "geometry_msgs/msg/point_stamped.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "tf2/convert.h"
@@ -30,6 +31,12 @@ rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub;
 std::shared_ptr<rclcpp::Node> node;
 std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
 std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+
+float turning_speed = 0.0f;
+
+void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    turning_speed = msg->twist.twist.angular.z;
+}
 
 typedef pcl::PointXYZRGB PointT;
 
@@ -59,6 +66,10 @@ float min_saturation = 0.22f; // HSV saturation threshold — rejects grey/beige
 float max_value_for_black = 0.25f; // brightness ceiling — allows black barrels to bypass saturation check
 
 void cloud_cb(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+    if (std::abs(turning_speed) > 0.2f) {
+        return;
+    }
+
     // save timestamp from message
     rclcpp::Time now = (*msg).header.stamp;
 
@@ -396,6 +407,9 @@ int main(int argc, char** argv) {
     // setup tf listener
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+    // odometry subscriber (turning speed check)
+    auto odom_sub = node->create_subscription<nav_msgs::msg::Odometry>("/odom", 10, odom_callback);
 
     // create publishers
     planes_pub = node->create_publisher<sensor_msgs::msg::PointCloud2>("filtered_point_cloud", 1);

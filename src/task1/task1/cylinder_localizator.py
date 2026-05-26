@@ -2,8 +2,8 @@
 """
 Cylinder localizator — clusters detections from cylinder_segmentation (already in
 map frame), confirms each barrel once, detects orientation (vertical/horizontal),
-logs a JSON report, saves a camera image for each barrel, and performs spill
-detection via point-cloud Z-slice analysis for horizontal barrels.
+logs a JSON report, and saves a camera image for each barrel.
+Spill detection is handled by the pointcloud_viewer node via service call.
 """
 
 import colorsys
@@ -19,18 +19,15 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
-from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import String, Empty
 from visualization_msgs.msg import Marker
 import tf2_ros
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-CLUSTER_RADIUS      = 0.45  # m — stable merge radius for repeated sightings
+CLUSTER_RADIUS      = 0.40  # m — stable merge radius for repeated sightings
 CLUSTER_RADIUS_H    = 0.65  # m — horizontal/front-facing cylinders vary more
 FAIR_THRESH         = 4     # detections before showing a temporary candidate marker
 CONFIRM_THRESH      = 10    # detections before confirming
@@ -42,13 +39,6 @@ MAX_RAW_PTS         = 300
 
 REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "barrell_detection")
 REPORT_JSON = os.path.join(REPORT_DIR, "barrel_report.json")
-
-# Spill detection — point cloud Z-slice above ground (map frame)
-SPILL_Z_MIN           = 0.005  # m — start of slice above ground
-SPILL_Z_MAX           = 0.03   # m — end of slice above ground
-SPILL_POINT_THRESHOLD = 50    # points in Z-slice → spill confirmed
-SPILL_SHOW_WINDOWS    = True
-SPILL_DEBUG_HOLD_SECS = 8.0   # seconds to hold in place after capture (shows debug window)
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -185,25 +175,13 @@ class CylinderLocalizator(Node):
         self.cylinder_locations_pub = self.create_publisher(
             Marker, "/detected_cylinder_locations", 10
         )
-        self.spill_done_pub = self.create_publisher(Empty, "/spill_check_done", 1)
-        self.spill_result_pub = self.create_publisher(String, "/barrel_inspection_result", 10)
-        self.spill_cloud_pub = self.create_publisher(PointCloud2, "/spill_points", 10)
-
-        self.create_subscription(Empty, "/start_spill_check", self._start_spill_cb, 10)
-
-        self.cloud_sub = self.create_subscription(
-            PointCloud2, "/oakd/rgb/preview/depth/points", self._cloud_callback, SENSOR_QOS
-        )
 
         self.clusters: list[Cluster] = []
         self.marker_id_counter = 0
         self.cluster_id_counter = 0
         self.confirmed_markers = {}
-        self.latest_cloud = None
 
         self.create_timer(2.0, self._republish_confirmed_markers)
-
-        self._spill_queue: list[tuple] = []  # (barrel_id, colour)
 
         self.get_logger().info(
             f"CylinderLocalizator ready — report: {REPORT_JSON}"
@@ -317,9 +295,8 @@ class CylinderLocalizator(Node):
 
         if orientation == "horizontal":
             self.get_logger().warn(
-                f"WARNING: Barrel #{barrel_id} ({colour}) is horizontal — queued for close leak inspection."
+                f"WARNING: Barrel #{barrel_id} ({colour}) is horizontal — behavior_manager will inspect."
             )
-            self._spill_queue.append((barrel_id, colour))
 
         image_path = self._save_image(barrel_id, leak)
         self._log_barrel(barrel_id, colour, orientation, leak, cx, cy, image_path)
@@ -367,166 +344,6 @@ class CylinderLocalizator(Node):
             [2 * (qx*qy + qz*qw), 1 - 2 * (qx**2 + qz**2), 2 * (qy*qz - qx*qw)],
             [2 * (qx*qz - qy*qw), 2 * (qy*qz + qx*qw), 1 - 2 * (qx**2 + qy**2)],
         ]
-
-    # ── Spill detection ───────────────────────────────────────────────────────
-    def _cloud_callback(self, msg: PointCloud2):
-        self.latest_cloud = msg
-
-    def _start_spill_cb(self, _msg: Empty):
-        """Called by behavior_manager when the robot has arrived at a horizontal barrel."""
-        if not self._spill_queue:
-            self.get_logger().warn("Spill check triggered but queue is empty — signalling done immediately.")
-            self._publish_spill_result(None, "unknown", None, 0)
-            self.spill_done_pub.publish(Empty())
-            return
-        barrel_id, colour = self._spill_queue.pop(0)
-        self.get_logger().info(f"Spill check triggered for barrel #{barrel_id} ({colour})")
-        self._do_spill_check(barrel_id, colour)
-
-    def _do_spill_check(self, barrel_id, colour):
-        if self.latest_cloud is None:
-            self.get_logger().warn(f"Spill check barrel #{barrel_id}: no point cloud available")
-            self._publish_spill_result(barrel_id, colour, None, 0)
-            self.spill_done_pub.publish(Empty())
-            return
-
-        cloud = self.latest_cloud
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                "map", cloud.header.frame_id, rclpy.time.Time(),
-                timeout=Duration(seconds=0.1),
-            )
-        except tf2_ros.TransformException as e:
-            self.get_logger().warn(f"Spill check barrel #{barrel_id}: TF lookup failed: {e}")
-            self._publish_spill_result(barrel_id, colour, None, 0)
-            self.spill_done_pub.publish(Empty())
-            return
-
-        t = tf.transform.translation
-        q = tf.transform.rotation
-        R = self._quat_to_mat(q.x, q.y, q.z, q.w)
-
-        # Read points from cloud
-        from sensor_msgs_py import point_cloud2 as pc2
-        try:
-            structured = pc2.read_points(cloud, field_names=("x", "y", "z"), skip_nans=True)
-        except Exception as e:
-            self.get_logger().warn(f"Spill check barrel #{barrel_id}: failed to read cloud: {e}")
-            self._publish_spill_result(barrel_id, colour, None, 0)
-            self.spill_done_pub.publish(Empty())
-            return
-
-        if len(structured) == 0:
-            self.get_logger().warn(f"Spill check barrel #{barrel_id}: empty point cloud")
-            self._publish_spill_result(barrel_id, colour, None, 0)
-            self.spill_done_pub.publish(Empty())
-            return
-
-        pts = np.column_stack([structured['x'], structured['y'], structured['z']])
-        pts = pts[~np.any(np.isnan(pts) | np.isinf(pts), axis=1)]
-
-        # Filter Z-slice above ground (map frame)
-        mask = (transformed[:, 2] >= SPILL_Z_MIN) & (transformed[:, 2] <= SPILL_Z_MAX)
-        slice_pts = transformed[mask]
-        count = len(slice_pts)
-        spill_detected = count >= SPILL_POINT_THRESHOLD
-
-        self.get_logger().info(
-            f"Spill check barrel #{barrel_id} ({colour}): "
-            f"{count} pts in Z-slice [{SPILL_Z_MIN}, {SPILL_Z_MAX}]m → "
-            f"{'SPILL DETECTED' if spill_detected else 'no spill'}"
-        )
-
-        for entry in self.report["barrels"]:
-            if entry["id"] == barrel_id:
-                entry["leak_detected"] = spill_detected
-                entry["spill_detected"] = spill_detected
-                entry["spill_point_count"] = count
-                break
-        self._save_report()
-        self._update_barrel_condition_label(barrel_id, spill_detected)
-
-        self._publish_spill_cloud(slice_pts)
-        self._visualize_spill_slice(barrel_id, colour, slice_pts, count, spill_detected)
-
-        # Hold in place for debugging — delay /spill_check_done
-        self._spill_pending = (barrel_id, colour, spill_detected, count)
-        self._spill_hold_timer = self.create_timer(SPILL_DEBUG_HOLD_SECS, self._spill_hold_done)
-
-    def _visualize_spill_slice(self, barrel_id, colour, points, count, spill_detected):
-        if not SPILL_SHOW_WINDOWS or len(points) == 0:
-            return
-
-        pts = np.array(points)
-        cx, cy = np.median(pts[:, 0]), np.median(pts[:, 1])
-        centered = pts[:, :2] - np.array([cx, cy])
-
-        scale = 200
-        img_pts = (centered * scale).astype(np.int32)
-        img_pts[:, 0] += 400
-        img_pts[:, 1] += 400
-
-        img = np.zeros((800, 800, 3), dtype=np.uint8)
-        for px, py in img_pts:
-            if 0 <= px < 800 and 0 <= py < 800:
-                cv2.circle(img, (px, py), 2, (0, 255, 0), -1)
-
-        label = f"Barrel #{barrel_id}: {count} pts in Z-slice [{SPILL_Z_MIN:.2f}, {SPILL_Z_MAX:.2f}]m"
-        verdict = "SPILL" if spill_detected else "OK"
-        v_color = (0, 0, 255) if spill_detected else (0, 255, 0)
-        cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        cv2.putText(img, verdict, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, v_color, 2)
-
-        cv2.namedWindow("Spill Point Cloud Slice", cv2.WINDOW_NORMAL)
-        cv2.imshow("Spill Point Cloud Slice", img)
-        cv2.waitKey(1)
-
-        if spill_detected:
-            fname = (
-                f"barrel_{barrel_id}_SPILL_{colour.upper()}_"
-                f"{datetime.now().strftime('%H%M%S')}.jpg"
-            )
-            cv2.imwrite(os.path.join(REPORT_DIR, fname), img)
-            self.get_logger().info(f"Spill debug image saved: {os.path.join(REPORT_DIR, fname)}")
-
-    def _publish_spill_cloud(self, points):
-        if len(points) == 0:
-            return
-        msg = PointCloud2()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "map"
-        msg.height = 1
-        msg.width = len(points)
-        msg.fields = [
-            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-        ]
-        msg.point_step = 12
-        msg.row_step = msg.point_step * msg.width
-        msg.is_bigendian = False
-        msg.is_dense = True
-        msg.data = np.array(points, dtype=np.float32).tobytes()
-        self.spill_cloud_pub.publish(msg)
-
-    def _publish_spill_result(self, barrel_id, colour, leak_detected, point_count):
-        msg = String()
-        msg.data = json.dumps({
-            "barrel_id": barrel_id,
-            "colour": colour,
-            "leak_detected": leak_detected,
-            "spill_point_count": point_count,
-        })
-        self.spill_result_pub.publish(msg)
-
-    def _spill_hold_done(self):
-        self._spill_hold_timer.cancel()
-        barrel_id, colour, spill_detected, count = self._spill_pending
-        self._publish_spill_result(barrel_id, colour, spill_detected, count)
-        self.spill_done_pub.publish(Empty())
-        self.get_logger().info(
-            f"Spill check complete for barrel #{barrel_id} — signalling behavior_manager."
-        )
 
     # ── Image saving ──────────────────────────────────────────────────────────
     def _save_image(self, barrel_id, leak):
@@ -602,7 +419,8 @@ class CylinderLocalizator(Node):
                 "orientation": orientation,
                 "leak_detected": leak_detected,
             }
-            self._publish_condition_label(int(barrel_id), x, y, z, leak_detected)
+            if leak_detected is not None:
+                self._publish_condition_label(int(barrel_id), x, y, z, leak_detected)
 
     def _update_barrel_condition_label(self, barrel_id, leak_detected):
         if barrel_id is None:
