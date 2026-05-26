@@ -57,4 +57,5 @@ build/
 terminal.sh
 .venv/
 src/rviz_2d_overlay_plugins/
+barrell_detection/
 

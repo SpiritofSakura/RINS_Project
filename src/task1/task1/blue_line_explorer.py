@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import math
+
 import cv2
 import numpy as np
 import rclpy
@@ -7,7 +9,7 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Bool, String
 
 try:
@@ -74,6 +76,17 @@ class BlueLineExplorer(Node):
         # How long (s) only "straight" must be lit before exiting split mode.
         self.declare_parameter("split_exit_hold", 0.5)
 
+        # ── LIDAR forward obstacle ───────────────────────────────────────────
+        self.declare_parameter("lidar_topic", "/scan")
+        # RPLIDAR is mounted yaw=+90° CCW, so forward is at -90° in scan frame.
+        self.declare_parameter("lidar_forward_angle_deg", -90.0)
+        # ±degrees around the forward ray — keep narrow to avoid window frames
+        self.declare_parameter("lidar_cone_half_angle_deg", 15.0)
+        # Slow down when obstacle is closer than this (m).
+        self.declare_parameter("lidar_slow_distance", 0.55)
+        # Hard U-turn when obstacle is closer than this (m).
+        self.declare_parameter("lidar_stop_distance", 0.40)
+
         # ── U-turn / recovery ────────────────────────────────────────────────
         self.declare_parameter("line_lost_timeout", 2.0)
         self.declare_parameter("uturn_angular_speed", 0.5)
@@ -87,6 +100,9 @@ class BlueLineExplorer(Node):
         self.bridge = CvBridge()
         self.image_sub = self.create_subscription(
             Image, camera_topic, self._image_callback, SENSOR_QOS)
+        self.lidar_sub = self.create_subscription(
+            LaserScan, self.get_parameter("lidar_topic").value,
+            self._lidar_callback, SENSOR_QOS)
         self.enable_sub = self.create_subscription(
             Bool, "/blue_line_enabled", self._enable_callback, 10)
         self.patrol_sub = self.create_subscription(
@@ -116,6 +132,7 @@ class BlueLineExplorer(Node):
         self.prev_angular = 0.0      # last published angular (for EMA smoothing)
         self.split_active = False    # True while navigating a split or re-centering
         self.split_exit_since = None # when only-straight condition first held
+        self.front_dist = float("inf")  # nearest obstacle directly ahead (m)
 
         self.timer = self.create_timer(0.1, self._update)
         self.get_logger().info(
@@ -149,6 +166,20 @@ class BlueLineExplorer(Node):
             if det.type == 1:  # BUMP
                 self._start_uturn("bump")
                 return
+
+    def _lidar_callback(self, msg):
+        if not msg.ranges:
+            return
+        # RPLIDAR mounted yaw=+90° CCW → robot forward = scan angle -90°.
+        fwd_rad = math.radians(float(self.get_parameter("lidar_forward_angle_deg").value))
+        half_rad = math.radians(float(self.get_parameter("lidar_cone_half_angle_deg").value))
+        n = len(msg.ranges)
+        center = int(round((fwd_rad - msg.angle_min) / msg.angle_increment))
+        half_idx = max(1, int(round(half_rad / msg.angle_increment)))
+        lo, hi = max(0, center - half_idx), min(n, center + half_idx + 1)
+        valid = [r for r in msg.ranges[lo:hi]
+                 if msg.range_min <= r <= msg.range_max and r == r]  # r==r drops NaN
+        self.front_dist = min(valid) if valid else float("inf")
 
     # ── state transitions ────────────────────────────────────────────────────
 
@@ -311,6 +342,20 @@ class BlueLineExplorer(Node):
         cx_norm, directions, blue_pixels, debug = self._detect()
 
         if debug is not None:
+            # LIDAR distance overlay — top-left second line
+            dist = self.front_dist
+            lbl = f"LIDAR fwd: {dist:.2f} m" if dist < float("inf") else "LIDAR fwd: --"
+            stop_d = float(self.get_parameter("lidar_stop_distance").value)
+            slow_d = float(self.get_parameter("lidar_slow_distance").value)
+            if dist <= stop_d:
+                col = (0, 0, 255)       # red  — U-turn imminent
+            elif dist <= slow_d:
+                col = (0, 165, 255)     # orange — slowing
+            else:
+                col = (200, 200, 200)   # grey — clear
+            cv2.putText(debug, lbl, (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.48, col, 2)
+            cv2.putText(debug, lbl, (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 1)
+
             if self.get_parameter("publish_debug_image").value:
                 try:
                     self.debug_pub.publish(
@@ -352,6 +397,10 @@ class BlueLineExplorer(Node):
 
         # ── Follow ───────────────────────────────────────────────────────────
         self._pub_state("BLUE_LINE_FOLLOW")
+
+        if self.front_dist <= float(self.get_parameter("lidar_stop_distance").value):
+            self._start_uturn("obstacle ahead")
+            return
 
         if cx_norm is None:
             if self.line_lost_since is None:
@@ -400,6 +449,9 @@ class BlueLineExplorer(Node):
         # ── Speed ─────────────────────────────────────────────────────────────
         linear = float(self.get_parameter(
             "linear_speed" if self.split_active else "fast_linear_speed").value)
+        # Creep through the slow zone so the camera has time to spot a left branch.
+        if self.front_dist <= float(self.get_parameter("lidar_slow_distance").value):
+            linear = float(self.get_parameter("linear_speed").value)
 
         # ── Steering ──────────────────────────────────────────────────────────
         steer = cx_norm
