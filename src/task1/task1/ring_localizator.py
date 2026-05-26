@@ -239,6 +239,15 @@ class RingLocalizator(Node):
         )
 
     # ──────────────────────────────────────────────────────────────────────────
+    def _delete_marker(self, marker_id, ns):
+        m = Marker()
+        m.header.frame_id = "map"
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = ns
+        m.id = int(marker_id)
+        m.action = Marker.DELETE
+        self.ring_locations_pub.publish(m)
+
     def _try_confirm(self, cluster: Cluster):
         cx, cy, cz = cluster.robust_centroid
 
@@ -247,6 +256,10 @@ class RingLocalizator(Node):
             if c.confirmed and c.dist2d(cx, cy) < MIN_MARK_DIST:
                 cluster.suppressed = True
                 return
+
+        # Remove any candidate/actionable markers for this cluster before publishing confirmed
+        self._delete_marker(cluster.cluster_id, "ring_candidate")
+        self._delete_marker(cluster.cluster_id, "ring_actionable")
 
         cluster.confirmed = True
         cluster.actionable = True

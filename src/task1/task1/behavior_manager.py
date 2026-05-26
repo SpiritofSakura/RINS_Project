@@ -160,6 +160,13 @@ class BehaviorManager(Node):
             10
         )
 
+        self.patrol_group_end_sub = self.create_subscription(
+            Empty,
+            '/patrol_group_end',
+            self.patrol_group_end_callback,
+            10
+        )
+
         self.timer = self.create_timer(0.2, self.main_loop)
 
         self.refresh_state(force_publish=True)
@@ -287,22 +294,27 @@ class BehaviorManager(Node):
         # Process pending detections only after navigation is ready. Confirmed markers
         # may be one-shot publications, so never pop them before they can become goals.
         if self.amcl_pose_ready and self.pending_targets and self.active_target is None:
-            target = self.pending_targets[0]
-
-            if self.is_already_handled(target['type'], target['x'], target['y'], target.get('color')):
-                self.pending_targets.pop(0)
-                self.get_logger().info(f"Queued {target['type']} detection already handled, skipping.")
-            else:
-                self.get_logger().info(f'Processing queued {target["type"]} detection (x={target["x"]:.2f}, y={target["y"]:.2f})')
+            # Scan for the first ready target. Barrels marked wait_for_group_end are
+            # held until the current waypoint rotation group finishes.
+            for i, target in enumerate(self.pending_targets):
+                if self.is_already_handled(target['type'], target['x'], target['y'], target.get('color')):
+                    self.pending_targets.pop(i)
+                    self.get_logger().info(f"Queued {target['type']} detection already handled, skipping.")
+                    break
+                if target.get('wait_for_group_end', False):
+                    continue  # deferred — skip until group_end fires
+                self.get_logger().info(
+                    f'Processing queued {target["type"]} detection (x={target["x"]:.2f}, y={target["y"]:.2f})')
                 metadata = {
                     key: value for key, value in target.items()
-                    if key not in ('type', 'x', 'y', 'z', 'color')
+                    if key not in ('type', 'x', 'y', 'z', 'color', 'wait_for_group_end')
                 }
                 if self.activate_target(
                     target['type'], target['x'], target['y'], target['z'],
                     target.get('color'), **metadata
                 ):
-                    self.pending_targets.pop(0)
+                    self.pending_targets.pop(i)
+                break
 
         if self.interaction_active and self.interaction_end_time is not None:
             if self.get_clock().now().nanoseconds >= self.interaction_end_time:
@@ -378,6 +390,26 @@ class BehaviorManager(Node):
             self.refresh_state()
 
         else:
+            # Face approach: retry at progressively farther distances when the planned
+            # path is blocked (e.g. by the inflation zone near a wall).
+            if nav_goal_type == 'approach_face' and self.active_target is not None:
+                attempt = self.active_target.get('face_approach_attempt', 0) + 1
+                self.active_target['face_approach_attempt'] = attempt
+                face_yaw = self.active_target.get('face_yaw')
+                retry_dists = [0.6, 1.0]  # fallback distances after the initial 0.3 m
+                if face_yaw is not None and attempt <= len(retry_dists):
+                    dist = retry_dists[attempt - 1]
+                    fx = self.active_target['x']
+                    fy = self.active_target['y']
+                    gx = fx + dist * math.cos(face_yaw)
+                    gy = fy + dist * math.sin(face_yaw)
+                    ry = math.atan2(fy - gy, fx - gx)
+                    self.get_logger().info(
+                        f'Face approach attempt {attempt} failed — retrying at {dist:.1f} m.')
+                    if self.send_nav_goal(gx, gy, ry, 'approach_face'):
+                        self.approach_start_time = self.get_clock().now().nanoseconds
+                        self.refresh_state()
+                        return
             self.get_logger().warn(f'Temporary navigation failed: {nav_goal_type}, status={status}')
             self.refresh_state()
 
@@ -420,7 +452,9 @@ class BehaviorManager(Node):
         return self.current_state == 'PATROL'
 
     def accepts_face_detections(self):
-        # Faces also scan during approach/interact so recognition continues while closing in
+        # No face detection during barrel approach/interact
+        if self.current_state in ('APPROACH_BARREL', 'INTERACT_BARREL'):
+            return False
         return self.current_state in ('PATROL', 'APPROACH_FACE', 'INTERACT_FACE')
 
     def is_active_target_match(self, target_type, x, y, color=None):
@@ -491,6 +525,32 @@ class BehaviorManager(Node):
 
         yaw = math.atan2(dy, dx)
         return goal_x, goal_y, yaw
+
+    def compute_barrel_approach_point(self, target_x, target_y):
+        """Approach a horizontal barrel from slightly to the right so the depth
+        camera has a clear view of any spill on the floor beside it."""
+        result = self.compute_approach_point(target_x, target_y)
+        if result is None:
+            return None
+        goal_x, goal_y, goal_yaw = result
+
+        robot_x = self.latest_robot_pose.position.x
+        robot_y = self.latest_robot_pose.position.y
+        dx = target_x - robot_x
+        dy = target_y - robot_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 0.05:
+            return result
+
+        # Right-perpendicular of the approach direction (clockwise 90°)
+        lateral = 0.3  # metres to the right
+        right_x = dy / dist
+        right_y = -dx / dist
+        goal_x += lateral * right_x
+        goal_y += lateral * right_y
+        # Keep yaw pointing toward the barrel
+        goal_yaw = math.atan2(target_y - goal_y, target_x - goal_x)
+        return goal_x, goal_y, goal_yaw
 
     def compute_face_approach_point(self, face_x, face_y, face_yaw):
         # Stand directly in front of the face (along its viewing direction) at 0.3 m
@@ -638,6 +698,8 @@ class BehaviorManager(Node):
         face_yaw = metadata.get('face_yaw') if target_type == 'face' else None
         if face_yaw is not None:
             approach = self.compute_face_approach_point(x, y, face_yaw)
+        elif target_type in ('barrel', 'cylinder') and metadata.get('is_horizontal', False):
+            approach = self.compute_barrel_approach_point(x, y)
         else:
             approach = self.compute_approach_point(x, y)
         if approach is None:
@@ -696,7 +758,8 @@ class BehaviorManager(Node):
         qw = msg.pose.orientation.w
         face_yaw = 2.0 * math.atan2(qz, qw)
 
-        self.queue_target({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None, 'face_yaw': face_yaw})
+        self.queue_target({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None, 'face_yaw': face_yaw,
+                           'wait_for_group_end': True})
 
     def ring_callback(self, msg: Marker):
         # Rings no longer require approach or interaction — detection only
@@ -731,6 +794,7 @@ class BehaviorManager(Node):
             'orientation': orientation,
             'barrel_id': msg.id,
             'leak_detected': False if not is_horizontal else None,
+            'wait_for_group_end': True,  # hold until current waypoint rotations finish
         })
 
     def target_done_callback(self, msg: Empty):
@@ -790,6 +854,21 @@ class BehaviorManager(Node):
                 self.active_target = None
 
         self.refresh_state()
+
+    def patrol_group_end_callback(self, msg: Empty):
+        """Fired by waypoint_navigator when the robot finishes all rotations at one
+        (x, y) position and is about to move to a new waypoint group."""
+        deferred = [t for t in self.pending_targets if t.get('wait_for_group_end')]
+        if not deferred:
+            return
+        for t in deferred:
+            t.pop('wait_for_group_end', None)
+        # Pause patrol immediately so the navigator doesn't start moving to the next
+        # waypoint before the barrel interaction is activated on the next main_loop tick.
+        if self.patrol_requested and not self.patrol_finished and self.active_target is None:
+            self.publish_patrol_enabled(False)
+            self.get_logger().info(
+                f'Patrol group ended — {len(deferred)} barrel(s) now ready, pausing patrol.')
 
     def patrol_command_callback(self, msg: Bool):
         self.patrol_requested = msg.data
