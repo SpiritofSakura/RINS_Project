@@ -2,6 +2,7 @@
 
 import math
 import json
+import os
 import random
 import shutil
 import subprocess
@@ -16,7 +17,10 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import Bool, String, Empty
 from std_srvs.srv import Trigger
+from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker
+from cv_bridge import CvBridge
+import cv2
 
 
 def yaw_to_quaternion(yaw):
@@ -67,6 +71,14 @@ class BehaviorManager(Node):
         self.waiting_for_spill_check = False
         self.spill_check_start_time = None
         self.spill_check_timeout = 10.0  # seconds before giving up waiting
+
+        self.bridge = CvBridge()
+        self._latest_oakd = None
+        self._pending_leak_capture = None
+        self._leak_image_seq = 0
+        self._oakd_sub = self.create_subscription(
+            Image, "/oakd/rgb/preview/image_raw", self._oakd_cb, 10
+        )
 
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
@@ -166,6 +178,7 @@ class BehaviorManager(Node):
 
         self.spill_check_client = self.create_client(Trigger, '/spill_check')
         self._pending_spill_future = None
+        self._barrel_result_pub = self.create_publisher(String, '/barrel_inspection_result', 10)
 
         self.amcl_pose_subscriber = self.create_subscription(
             PoseWithCovarianceStamped,
@@ -270,6 +283,25 @@ class BehaviorManager(Node):
     def random_ring_line(self, color):
         template = random.choice(self.ring_lines)
         return template.format(color=color)
+
+    def _oakd_cb(self, msg):
+        try:
+            self._latest_oakd = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except Exception:
+            pass
+
+    def _save_leak_image(self):
+        if self._latest_oakd is None:
+            self.get_logger().warn("No OAK-D image available for leak capture")
+            return False
+        leak_dir = os.path.expanduser("~/RINS_Project/reports/img/barrels")
+        os.makedirs(leak_dir, exist_ok=True)
+        filename = f"leak_{self._leak_image_seq:04d}.jpg"
+        self._leak_image_seq += 1
+        path = os.path.join(leak_dir, filename)
+        cv2.imwrite(path, self._latest_oakd)
+        self.get_logger().info(f"Saved leak image: {path}")
+        return True
 
     def random_barrel_line(self, color, orientation, leak_detected):
         template = random.choice(self.barrel_lines)
@@ -383,7 +415,21 @@ class BehaviorManager(Node):
                 self.waiting_for_spill_check = False
                 self.spill_check_start_time = None
                 self._pending_spill_future = None
-                self.start_interaction()
+                if self.active_target is not None:
+                    result = String()
+                    result.data = json.dumps({
+                        "barrel_id": self.active_target.get("barrel_id"),
+                        "leak_detected": self.active_target.get("leak_detected"),
+                    })
+                    self._barrel_result_pub.publish(result)
+                if (self.active_target is not None
+                        and self.active_target.get('leak_detected')
+                        and self._latest_oakd is not None):
+                    self.get_logger().info("Leak detected — capturing image immediately")
+                    self._save_leak_image()
+                    self._pending_leak_capture = self.get_clock().now().nanoseconds
+                else:
+                    self.start_interaction()
             elif self.spill_check_start_time is not None:
                 elapsed = (self.get_clock().now().nanoseconds - self.spill_check_start_time) / 1e9
                 if elapsed >= self.spill_check_timeout:
@@ -394,6 +440,14 @@ class BehaviorManager(Node):
                     if self.active_target is not None:
                         self.active_target['leak_detected'] = None
                     self.start_interaction()
+            return
+
+        # Leak capture: stay still for 1 second after image, then interact
+        if self._pending_leak_capture is not None:
+            elapsed = (self.get_clock().now().nanoseconds - self._pending_leak_capture) / 1e9
+            if elapsed >= 1.0:
+                self._pending_leak_capture = None
+                self.start_interaction()
             return
 
         # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
@@ -478,6 +532,13 @@ class BehaviorManager(Node):
                             self.active_target['leak_detected'] = None
                         self.start_interaction()
                 else:
+                    if self.active_target is not None:
+                        result = String()
+                        result.data = json.dumps({
+                            "barrel_id": self.active_target.get("barrel_id"),
+                            "leak_detected": self.active_target.get("leak_detected"),
+                        })
+                        self._barrel_result_pub.publish(result)
                     self.start_interaction()
 
             else:
