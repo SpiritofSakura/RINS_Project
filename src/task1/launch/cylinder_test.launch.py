@@ -1,9 +1,10 @@
 from launch import LaunchDescription
+from launch.actions import TimerAction
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    """Minimal launch for testing cylinder detection: segmentation + localizator + debug view."""
+    """Minimal launch for testing cylinder detection: segmentation + localizator + debug view + behavior manager."""
 
     arm_mover_node = Node(
         package='dis_tutorial7',
@@ -34,11 +35,34 @@ def generate_launch_description():
         parameters=[{'show_windows': True}],
     )
 
+    behavior_manager_node = Node(
+        package='task1',
+        executable='behavior_manager',
+        name='behavior_manager',
+        output='screen',
+    )
+
+    delayed_cylinder_segmentation = TimerAction(
+        period=6.0,
+        actions=[cylinder_segmentation_node],
+    )
+
+    delayed_cylinder_localizator = TimerAction(
+        period=6.0,
+        actions=[cylinder_localizator_node],
+    )
+
+    delayed_cylinder_debug_view = TimerAction(
+        period=6.0,
+        actions=[cylinder_debug_view_node],
+    )
+
     ld = LaunchDescription([
         arm_mover_node,
-        cylinder_segmentation_node,
-        cylinder_localizator_node,
-        cylinder_debug_view_node,
+        behavior_manager_node,
+        delayed_cylinder_segmentation,
+        delayed_cylinder_localizator,
+        delayed_cylinder_debug_view,
     ])
 
     return ld
