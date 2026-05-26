@@ -218,9 +218,6 @@ class FaceRecognizer(Node):
                 cv2.putText(draw_img, role, (left, bottom + 18),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
-        cv2.imshow('Face Recognition', draw_img)
-        cv2.waitKey(1)
-
         try:
             self.debug_pub.publish(self.bridge.cv2_to_imgmsg(draw_img, 'bgr8'))
         except CvBridgeError:

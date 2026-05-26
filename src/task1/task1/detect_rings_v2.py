@@ -22,7 +22,6 @@ from visualization_msgs.msg import Marker
 from std_msgs.msg import String
 from builtin_interfaces.msg import Duration
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
-from nav_msgs.msg import Odometry
 
 # ── QoS ───────────────────────────────────────────────────────────────────────
 SENSOR_QOS = QoSProfile(
@@ -97,7 +96,6 @@ class RingDetectorV2(Node):
 
         # Robot state for conditional publishing
         self.robot_state = 'IDLE'
-        self.turning_speed = 0.0
 
         # Cross-frame candidates: list of {cx, cy, hits, missed, colour, depth_m}
         self._candidates = []
@@ -114,8 +112,6 @@ class RingDetectorV2(Node):
             PointCloud2, "/oakd/rgb/preview/depth/points", self.pointcloud_callback, SENSOR_QOS)
         self.robot_state_sub = self.create_subscription(
             String, "/robot_state", self.robot_state_callback, 10)
-        self.odom_sub = self.create_subscription(
-            Odometry, "/odom", self.odom_callback, 10)
 
         # Publishers
         self.marker_pub = self.create_publisher(Marker, "/ring_marker", 10)
@@ -123,7 +119,6 @@ class RingDetectorV2(Node):
 
         # Debug windows
         cv2.namedWindow("Hough Circles", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Masked view", cv2.WINDOW_NORMAL)
         
         # Store combined mask for color extraction
         self.combined_mask = None
@@ -230,56 +225,20 @@ class RingDetectorV2(Node):
                                      detection['ring_patch'], detection['radius'], detection['patch_mask'],
                                      detection['patch_origin'])
 
-        # Debug visualization
+        # Debug visualization — Hough Circles window only
         debug_img = self.rgb_image.copy()
-        ring_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
-        combined_visualization_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
-        turning_fast = abs(self.turning_speed) > 0.2
-        circle_color = (0, 0, 255) if turning_fast else (0, 255, 0)
         if circles is not None:
             for circle in circles[0]:
                 cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
-                cv2.circle(debug_img, (cx, cy), r, circle_color, 2)
+                cv2.circle(debug_img, (cx, cy), r, (0, 255, 0), 2)
                 cv2.circle(debug_img, (cx, cy), 2, (0, 0, 255), 3)
-                # Create mask for detected rings
-                cv2.circle(ring_mask, (cx, cy), r, 255, -1)
-        
-        # Dilate ring mask by 20% (to expand ring boundaries)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        dilated_ring_mask = cv2.dilate(ring_mask, kernel, iterations=2)
-        
-        # Combine: dilated ring mask AND disparity mask (valid depth)
-        combined_mask_display = cv2.bitwise_and(dilated_ring_mask, disparity_mask)
-
-        # ── Color mask (full image) for debug ──
-        hsv_full = cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2HSV)
-        full_color_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
-        for colour_name in ("black", "green", "blue", "red"):
-            for lower, upper in COLOUR_RANGES[colour_name]:
-                full_color_mask |= cv2.inRange(hsv_full, lower, upper)
-
-        # Final mask: spatial + disparity + color
-        final_mask_display = cv2.bitwise_and(combined_mask_display, full_color_mask)
-        
-        # Apply final mask to RGB image for visualization
-        masked_view = cv2.bitwise_and(self.rgb_image, self.rgb_image, mask=final_mask_display)
-
-        h_dbg = debug_img.shape[0]
-        cv2.putText(debug_img, f"turn: {self.turning_speed:.2f} rad/s",
-                    (10, h_dbg - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                    (0, 0, 255) if turning_fast else (0, 255, 0), 2)
 
         cv2.imshow("Hough Circles", debug_img)
-        cv2.imshow("Masked view", masked_view)
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
         """Update robot state for conditional marker publishing."""
         self.robot_state = data.data
-
-    def odom_callback(self, data):
-        """Extract turning speed from odometry."""
-        self.turning_speed = data.twist.twist.angular.z
 
     def _evaluate_circle(self, cx, cy, radius, depth_m, rgb_img, disparity_mask):
         """

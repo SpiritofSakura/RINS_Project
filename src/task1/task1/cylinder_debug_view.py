@@ -292,9 +292,7 @@ class CylinderDebugView(Node):
                         (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (160, 160, 160), 1, cv2.LINE_AA)
 
-        if self.show_windows:
-            cv2.imshow("Top Camera (spill detection)", img)
-            cv2.waitKey(1)
+        # Top camera window disabled for performance
 
         try:
             self.top_debug_pub.publish(self.bridge.cv2_to_imgmsg(img, "bgr8"))

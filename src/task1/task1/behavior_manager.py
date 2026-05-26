@@ -860,6 +860,18 @@ class BehaviorManager(Node):
         if self.manual_control_active:
             self.interaction_active = False
             self.interaction_end_time = None
+            self.waiting_for_spill_check = False
+            self.spill_check_start_time = None
+            # Clear active target if mid-interaction so refresh_state() can
+            # transition to MANUAL_CONTROL/IDLE instead of looping on INTERACT_*
+            if self.active_target is not None and self.current_state in (
+                'INTERACT_FACE', 'INTERACT_RING', 'INTERACT_BARREL',
+            ):
+                self.handled_targets.append(self.active_target)
+                self.get_logger().info(
+                    f"Manual control interrupted {self.active_target['type']} interaction — marking as done."
+                )
+                self.active_target = None
 
         self.refresh_state()
 
