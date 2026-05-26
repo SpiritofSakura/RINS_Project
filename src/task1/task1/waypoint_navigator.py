@@ -13,7 +13,7 @@ from ament_index_python.packages import get_package_share_directory
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Empty
 
 
 def yaw_v_kvaternion(kot):
@@ -61,6 +61,8 @@ class WaypointNavigator(Node):
             '/patrol_finished',
             qos_lat
         )
+
+        self.pub_group_end = self.create_publisher(Empty, '/patrol_group_end', 10)
 
         self.casovnik = self.create_timer(0.2, self.zanka)
 
@@ -188,18 +190,34 @@ class WaypointNavigator(Node):
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info(f'Tocka {self.indeks_tocke + 1} dosezena.')
-            pause = float(self.seznam_tock[self.indeks_tocke].get('pause', 0.0))
+            completed_point = self.seznam_tock[self.indeks_tocke]
+            pause = float(completed_point.get('pause', 0.0))
             self.indeks_tocke += 1
 
             if self.indeks_tocke >= len(self.seznam_tock):
                 self.get_logger().info('Vse tocke so opravljene.')
                 self.koncan = True
                 self.objavi_koncanost(True)
-            elif pause > 0.0:
-                self.pause_until = self.get_clock().now().nanoseconds + int(pause * 1e9)
-                self.get_logger().info(f'Dwelling {pause:.1f}s before next waypoint.')
-            elif self.patrol_omogocen:
-                self.poslji_naslednjo_tocko()
+                self.pub_group_end.publish(Empty())
+            else:
+                next_point = self.seznam_tock[self.indeks_tocke]
+                group_ended = (
+                    float(next_point['x']) != float(completed_point['x']) or
+                    float(next_point['y']) != float(completed_point['y'])
+                )
+                if group_ended:
+                    self.pub_group_end.publish(Empty())
+                    if pause > 0.0:
+                        self.pause_until = self.get_clock().now().nanoseconds + int(pause * 1e9)
+                        self.get_logger().info(f'Group done. Dwelling {pause:.1f}s.')
+                    # Do NOT call poslji_naslednjo_tocko() here — let the next
+                    # zanka() tick send the goal after behavior_manager has had a
+                    # chance to pause patrol for any deferred barrel targets.
+                elif pause > 0.0:
+                    self.pause_until = self.get_clock().now().nanoseconds + int(pause * 1e9)
+                    self.get_logger().info(f'Dwelling {pause:.1f}s before next waypoint.')
+                elif self.patrol_omogocen:
+                    self.poslji_naslednjo_tocko()
 
         elif status in (
             GoalStatus.STATUS_CANCELED,
