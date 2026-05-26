@@ -336,7 +336,7 @@ currently the inspector reads from yaml - in the actual implementation, those wa
   Nav2 `NavigateToPose` action. Predefined waypoints in `config/waypoints.yaml`. Robot patrols in a loop, interrupts for detections, returns to saved patrol pose after each interaction.
 
 - **Face detection** ✅  
-  YOLO-based detector (`detect_people.py`) publishes person bounding boxes and 3D position. `face_localizator` confirms locations after 10 detections within 1 m radius.
+  YOLO-based detector (`detect_people.py`) publishes person bounding boxes and 3D position. `face_localizator` confirms locations after 5 detections within 0.6 m radius.
 
 - **Ring detection** ✅  
   `detect_rings_v2.py` uses OpenCV Hough circle transform on the depth-registered RGB image. HSV-based color classification (red, green, blue, yellow, orange, black). `ring_localizator` confirms and deduplicates.
@@ -356,10 +356,10 @@ currently the inspector reads from yaml - in the actual implementation, those wa
 ### Should do
 
 - **Face recognition** ✅  
-  `face_recognizer.py` loads reference images from `config/personnel/` (filename format: `firstname_pronoun1_pronoun2_role_title.png`). Uses the `face_recognition` library (dlib) at tolerance 0.5. Publishes name + role on `/recognized_person`.
+  `face_recognizer.py` loads reference images from `config/personnel/` (filename format: `firstname_pronoun1_pronoun2_role_title.png`). Uses the `face_recognition` library (dlib) at tolerance 0.6. Cross-gender matches require stricter threshold (0.45) to reduce false positives. Publishes name + role on `/recognized_person`.
 
 - **Gender recognition** ✅  
-  DeepFace (`dominant_gender`) runs on the face crop extracted from `face_recognition` bounding boxes. Result is visual only — not derived from pronouns/filename. Shown live in the "Face Recognition" debug window as `Name (man/woman)` with a green bounding box and role label below.
+  OpenCV DNN with Levi & Hassner caffemodel (`config/models/gender_net.caffemodel`) runs on the face crop. Gender is detected independently of pronouns/filename. Shown live in the "Face Recognition" debug window as `Name (gender)` with a green bounding box and role label below.
 
 - **Autonomous space exploration** ⚠️  
   Waypoint patrol covers the map. Waypoints defined in `config/waypoints.yaml`. Robot resumes patrol from saved pose after each interaction. **Missing:** advanced fine manoeuvring and intelligent exploration (dynamic replanning, frontier-based exploration, obstacle-aware fine positioning).
@@ -456,8 +456,8 @@ View with: `rqt_image_view /face_debug_image`
 
 ```bash
 pip3 install face_recognition --break-system-packages
-pip3 install deepface tf-keras --break-system-packages
 pip3 install "numpy<2" --break-system-packages   # keep numpy 1.x for cv_bridge
+# Gender detection uses caffemodel (config/models/) — no DeepFace/TensorFlow needed
 
 # Anomaly detection / tile classifier
 pip3 install torch torchvision --break-system-packages

@@ -10,9 +10,6 @@ PIP="pip3 install --break-system-packages"
 echo "=== Installing face recognition ==="
 $PIP face_recognition
 
-echo "=== Installing gender/face attribute analysis (DeepFace) ==="
-$PIP deepface
-
 echo "=== Installing PDF generation ==="
 $PIP fpdf2
 
