@@ -22,6 +22,7 @@ from visualization_msgs.msg import Marker
 from std_msgs.msg import String
 from builtin_interfaces.msg import Duration
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from nav_msgs.msg import Odometry
 
 # ── QoS ───────────────────────────────────────────────────────────────────────
 SENSOR_QOS = QoSProfile(
@@ -96,6 +97,7 @@ class RingDetectorV2(Node):
 
         # Robot state for conditional publishing
         self.robot_state = 'IDLE'
+        self.turning_speed = 0.0
 
         # Cross-frame candidates: list of {cx, cy, hits, missed, colour, depth_m}
         self._candidates = []
@@ -112,6 +114,8 @@ class RingDetectorV2(Node):
             PointCloud2, "/oakd/rgb/preview/depth/points", self.pointcloud_callback, SENSOR_QOS)
         self.robot_state_sub = self.create_subscription(
             String, "/robot_state", self.robot_state_callback, 10)
+        self.odom_sub = self.create_subscription(
+            Odometry, "/odom", self.odom_callback, 10)
 
         # Publishers
         self.marker_pub = self.create_publisher(Marker, "/ring_marker", 10)
@@ -231,10 +235,12 @@ class RingDetectorV2(Node):
         debug_img = self.rgb_image.copy()
         ring_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
         combined_visualization_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
+        turning_fast = abs(self.turning_speed) > 0.3
+        circle_color = (0, 0, 255) if turning_fast else (0, 255, 0)
         if circles is not None:
             for circle in circles[0]:
                 cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2])
-                cv2.circle(debug_img, (cx, cy), r, (0, 255, 0), 2)
+                cv2.circle(debug_img, (cx, cy), r, circle_color, 2)
                 cv2.circle(debug_img, (cx, cy), 2, (0, 0, 255), 3)
                 # Create mask for detected rings
                 cv2.circle(ring_mask, (cx, cy), r, 255, -1)
@@ -259,6 +265,10 @@ class RingDetectorV2(Node):
         # Apply final mask to RGB image for visualization
         masked_view = cv2.bitwise_and(self.rgb_image, self.rgb_image, mask=final_mask_display)
 
+        cv2.putText(debug_img, f"turn: {self.turning_speed:.2f} rad/s",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                    (0, 0, 255) if turning_fast else (0, 255, 0), 2)
+
         cv2.imshow("Disparity", disparity_8u)
         cv2.imshow("Hough Circles", debug_img)
         cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
@@ -270,6 +280,10 @@ class RingDetectorV2(Node):
     def robot_state_callback(self, data):
         """Update robot state for conditional marker publishing."""
         self.robot_state = data.data
+
+    def odom_callback(self, data):
+        """Extract turning speed from odometry."""
+        self.turning_speed = data.twist.twist.angular.z
 
     def _evaluate_circle(self, cx, cy, radius, depth_m, rgb_img, disparity_mask):
         """
@@ -574,7 +588,11 @@ class RingDetectorV2(Node):
         # Only publish when idle or on patrol - avoid interfering with other tasks
         if self.robot_state not in ['IDLE', 'PATROL']:
             return
-        
+
+        # Skip publishing if turning too fast (motion blur)
+        if abs(self.turning_speed) > 0.3:
+            return
+
         if self.image_header is None:
             return
 
