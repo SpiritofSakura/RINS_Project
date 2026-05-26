@@ -224,7 +224,8 @@ class RingDetectorV2(Node):
             # Publish to /ring_marker (color will be inferred from patch mask)
             # Let ring_localizator handle aggregation and confirmation
             self._publish_marker_raw(detection['cx'], detection['cy'], detection['depth_m'], 
-                                     detection['ring_patch'], detection['radius'], detection['patch_mask'])
+                                     detection['ring_patch'], detection['radius'], detection['patch_mask'],
+                                     detection['patch_origin'])
 
         # Debug visualization
         debug_img = self.rgb_image.copy()
@@ -263,6 +264,7 @@ class RingDetectorV2(Node):
         cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
         cv2.imshow("Masked view", masked_view)
         cv2.imshow("Color Mask", full_color_mask)
+        cv2.imshow("Disparity Masked", cv2.bitwise_and(disparity_8u, disparity_8u, mask=final_mask_display))
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
@@ -315,19 +317,11 @@ class RingDetectorV2(Node):
         ring_patch = rgb_img[y1:y2, x1:x2].copy()
         patch_mask = combined_circle_mask[y1:y2, x1:x2]
 
-        # ── Mask centroid for precise localisation ──
-        mask_pts = cv2.findNonZero(patch_mask)
-        if mask_pts is not None and len(mask_pts) > 5:
-            centroid = np.mean(mask_pts, axis=0).astype(int)[0]
-            loc_cx = x1 + centroid[0]
-            loc_cy = y1 + centroid[1]
-        else:
-            loc_cx, loc_cy = cx, cy
-
         return {
-            "cx": loc_cx, "cy": loc_cy, "radius": radius,
+            "cx": cx, "cy": cy, "radius": radius,
             "depth_m": centre_depth, "ring_patch": ring_patch,
-            "patch_mask": patch_mask
+            "patch_mask": patch_mask,
+            "patch_origin": (x1, y1),
         }
 
     def _classify_ring_colour_with_mask(self, ring_patch, patch_mask):
@@ -570,7 +564,7 @@ class RingDetectorV2(Node):
             self.get_logger().warn(f"Failed to classify PC RGB: {e}")
             return "unknown"
 
-    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch, radius, patch_mask):
+    def _publish_marker_raw(self, cx, cy, depth_m, ring_patch, radius, patch_mask, patch_origin):
         """
         Publish raw detection to /ring_marker using 3D position and color from image.
         Uses patch_mask to extract color from only the valid ring pixels (filters grey holder).
@@ -584,35 +578,31 @@ class RingDetectorV2(Node):
         if self.image_header is None:
             return
 
-        # Get 3D position from point cloud (accurate, in base_link frame)
+        # Get 3D position from point cloud using mask centroid average
         x, y, z = None, None, None
         used_pointcloud = False
-        
-        if self.pointcloud_xyz is not None:
+
+        if self.pointcloud_xyz is not None and patch_mask is not None:
             try:
-                # Get 3D position from center or nearby points
-                neighbors_for_position = [
-                    (cy, cx),  # center
-                    (cy, cx + 10),  # right
-                    (cy, cx - 10),  # left
-                    (cy + 10, cx),  # down
-                    (cy - 10, cx),  # up
-                ]
-                
-                for ny, nx in neighbors_for_position:
-                    ny_clamped = max(0, min(ny, self.pointcloud_xyz.shape[0] - 1))
-                    nx_clamped = max(0, min(nx, self.pointcloud_xyz.shape[1] - 1))
-                    pt = self.pointcloud_xyz[int(ny_clamped), int(nx_clamped), :]
-                    
-                    if np.all(np.isfinite(pt)):
-                        x, y, z = pt[0], pt[1], pt[2]
+                mask_pts = cv2.findNonZero(patch_mask)
+                if mask_pts is not None and len(mask_pts) > 5:
+                    pts_3d = []
+                    x1, y1 = patch_origin
+                    for pt in mask_pts:
+                        px = x1 + pt[0][0]
+                        py = y1 + pt[0][1]
+                        px_c = max(0, min(px, self.pointcloud_xyz.shape[1] - 1))
+                        py_c = max(0, min(py, self.pointcloud_xyz.shape[0] - 1))
+                        p = self.pointcloud_xyz[py_c, px_c, :]
+                        if np.all(np.isfinite(p)):
+                            pts_3d.append(p)
+                    if pts_3d:
+                        avg = np.mean(pts_3d, axis=0)
+                        x, y, z = avg[0], avg[1], avg[2]
                         used_pointcloud = True
-                        break
-                        
+
             except Exception as e:
                 self.get_logger().debug(f"Failed to get point cloud position: {e}")
-
-        # Reject detection if no valid 3D position found - don't publish false positives
 
         if x is None or y is None or z is None:
             return
