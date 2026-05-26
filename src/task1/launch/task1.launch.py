@@ -44,6 +44,7 @@ def generate_launch_description():
         package='task1',
         executable='face_localizator',
         name='face_localizator',
+        output='screen',
     )
 
     face_recognizer_node = Node(

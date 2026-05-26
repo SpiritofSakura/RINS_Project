@@ -1,5 +1,16 @@
 # RINS Task 1 — Inspection Robot (anomaly-flow)
 
+## Setup (first time after cloning)
+
+```bash
+# Install all required Python packages
+./install_deps.sh
+
+# Build the ROS2 workspace
+./colcon_build.sh
+source install/setup.bash
+```
+
 ## Running
 
 ### Task 1 — Person/ring/cylinder inspection
