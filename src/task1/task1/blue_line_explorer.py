@@ -85,7 +85,7 @@ class BlueLineExplorer(Node):
         # Slow down when obstacle is closer than this (m).
         self.declare_parameter("lidar_slow_distance", 0.55)
         # Hard U-turn when obstacle is closer than this (m).
-        self.declare_parameter("lidar_stop_distance", 0.40)
+        self.declare_parameter("lidar_stop_distance", 0.37)
 
         # ── U-turn / recovery ────────────────────────────────────────────────
         self.declare_parameter("line_lost_timeout", 2.0)
