@@ -27,10 +27,10 @@ waypoints:
   yaw: -1.5708   # South
   pause: 1.0
 
-# ── Waypoint 2 — 270° scan: South → West → North ─────────────────────────────
+# ── Waypoint 2 — 270° scan: North → West → South ─────────────────────────────
 - x: 0.023
   y: -4.385
-  yaw: -1.5708   # South
+  yaw: 1.5708    # North
   pause: 1.0
 - x: 0.023
   y: -4.385
@@ -38,7 +38,7 @@ waypoints:
   pause: 1.0
 - x: 0.023
   y: -4.385
-  yaw: 1.5708    # North (last — harder to skip)
+  yaw: -1.5708   # South (last)
   pause: 1.0
 
 # ── Waypoint 3 — 270° scan: East → North → West ──────────────────────────────

@@ -920,7 +920,8 @@ class BehaviorManager(Node):
         qw = msg.pose.orientation.w
         face_yaw = 2.0 * math.atan2(qz, qw)
 
-        self.queue_target({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None, 'face_yaw': face_yaw})
+        self.queue_target({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None, 'face_yaw': face_yaw,
+                           'wait_for_group_end': True})
 
     def ring_callback(self, msg: Marker):
         # Rings no longer require approach or interaction — detection only

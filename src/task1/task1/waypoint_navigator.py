@@ -152,6 +152,14 @@ class WaypointNavigator(Node):
         if not self.patrol_omogocen:
             self.prej_patro_om = False
             self.pause_until = None
+            # Discard a completed result that arrived while patrol was off.
+            # Without this, a stale STATUS_SUCCEEDED would advance indeks_tocke
+            # on the next tick after patrol resumes, causing the robot to skip
+            # the first waypoint of the next group.
+            if self.rezultat_prihodnost is not None and self.rezultat_prihodnost.done():
+                self.rezultat_prihodnost = None
+                self.cilj_aktiven = False
+                self.rocaj_cilja = None
             return
 
         if not self.prej_patro_om:
