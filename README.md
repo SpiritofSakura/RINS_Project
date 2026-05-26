@@ -11,6 +11,53 @@
 source install/setup.bash
 ```
 
+## Face Recognition
+
+Face recognition runs automatically as part of `task1.launch.py` — no separate launch needed.
+
+### How it works
+
+```
+Camera → detect_people.py (YOLO) → /people_marker (3D position)
+                                          ↓
+Camera → face_recognizer.py ←────────────┘
+         • runs face_recognition at 2 Hz
+         • matches against config/personnel/ photos
+         • detects gender via caffemodel
+         → /recognized_person (name, role, gender, map coords)
+                  ↓
+         face_localizator.py
+         • clusters detections (radius 0.6 m)
+         • confirms after 5 detections
+         → /detected_face_locations (RViz sphere + name label)
+```
+
+### Adding new personnel
+
+Add a PNG photo to `src/task1/config/personnel/` with the filename format:
+```
+firstname_pronoun1_pronoun2_job_title.png
+# examples:
+ana_she_her_quality_inspector.png
+marko_he_him_warehouse_manager.png
+```
+Then rebuild: `colcon build --packages-select task1 --merge-install`
+
+### Debug
+
+- **"Face Recognition" window** — live camera feed with bounding boxes: green = recognized, blue = unknown face
+- **RViz `/detected_face_locations`** — green sphere + name label on map once confirmed
+- **Terminal** — `[face_recognizer] Recognized: Ana (quality inspector, female) confidence=0.82`
+
+### Tuning
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `recognition_tolerance` | 0.6 | Higher = more lenient matching (more false positives) |
+| `threshold_detections` | 5 | Detections needed before marker appears on map |
+
+---
+
 ## Running
 
 ### Task 1 — Person/ring/cylinder inspection
