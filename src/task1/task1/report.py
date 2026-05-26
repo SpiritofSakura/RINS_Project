@@ -85,6 +85,10 @@ class ReportManager(Node):
 
         self.tiles_per_station = {}
         self._current_station = None
+        self.rings_requested = False
+        self.barrels_requested = False
+        self.defect_stations = set()
+        self.requested_by = "Not implemented yet"
         self._warped_cache = {}
         self._heatmap_cache = {}
         self._pending_defect = None
@@ -92,6 +96,9 @@ class ReportManager(Node):
 
         self._ensure_dirs()
 
+        self.qr_sub = self.create_subscription(
+            String, "/qr", self._qr_callback, 10
+        )
         self.cmd_sub = self.create_subscription(
             String, "/report_commands", self._cmd_callback, 10
         )
@@ -119,6 +126,23 @@ class ReportManager(Node):
     def _ensure_dirs(self):
         for d in (self.pdf_dir, self.img_barrels_dir, self.img_defects_dir):
             os.makedirs(d, exist_ok=True)
+
+    def _qr_callback(self, msg: String):
+        lower = msg.data.strip().lower()
+        if lower == "rings":
+            self.rings_requested = True
+            self.get_logger().info("QR requested: rings")
+        elif lower == "barrels":
+            self.barrels_requested = True
+            self.get_logger().info("QR requested: barrels")
+        elif lower.startswith("defects "):
+            color = lower.split(" ", 1)[1]
+            self.defect_stations.add(color)
+            self.get_logger().info(f"QR requested: defects for {color}")
+        elif lower.startswith("person "):
+            name = msg.data.strip()[7:]
+            self.requested_by = name
+            self.get_logger().info(f"Task requested by: {name}")
 
     def _cmd_callback(self, msg: String):
         cmd = msg.data.strip().lower()
@@ -367,42 +391,41 @@ class ReportManager(Node):
         pdf.cell(0, 7, f"Report: {report_name}", ln=True)
         pdf.ln(6)
 
-        pdf.section_title("Task: Ring Counting")
-        pdf.subsection("Requested by: Not implemented yet")
-        pdf.ln(2)
-        pdf.body("Results:")
-        pdf.body("- Total number of rings detected:  0")
-        pdf.body("- Detected colors:")
-        pdf.body("    {color1}: 0")
-        pdf.body("    {color2}: 0")
-        pdf.ln(4)
+        if self.rings_requested:
+            pdf.section_title("Task: Ring Counting")
+            pdf.subsection(f"Requested by: {self.requested_by}")
+            pdf.ln(2)
+            pdf.body("Results:")
+            pdf.body("- Total number of rings detected:  0")
+            pdf.body("- Detected colors:")
+            pdf.body("    {color1}: 0")
+            pdf.body("    {color2}: 0")
+            pdf.ln(4)
 
-        pdf.add_page()
-        pdf.section_title("Task: Barrel Inspection")
-        pdf.subsection("Requested by: Not implemented yet")
-        pdf.ln(2)
-        pdf.body("Results:")
-        pdf.body("- Total number of barrels inspected:  0")
-        pdf.ln(2)
-        cols = ("Barrel ID", "Colour", "Orientation", "Leak detected")
-        widths = (28, 28, 40, 36)
-        pdf.table_header(cols, widths)
-        pdf.table_row(("-", "-", "-", "-"), widths)
-        pdf.ln(4)
+        if self.barrels_requested:
+            pdf.add_page()
+            pdf.section_title("Task: Barrel Inspection")
+            pdf.subsection(f"Requested by: {self.requested_by}")
+            pdf.ln(2)
+            pdf.body("Results:")
+            pdf.body("- Total number of barrels inspected:  0")
+            pdf.ln(2)
+            cols = ("Barrel ID", "Colour", "Orientation", "Leak detected")
+            widths = (28, 28, 40, 36)
+            pdf.table_header(cols, widths)
+            pdf.table_row(("-", "-", "-", "-"), widths)
+            pdf.ln(4)
 
-        pdf.add_page()
-        pdf.section_title("Task: Anomaly Detection")
-
-        if not self.tiles_per_station:
-            pdf.set_font("Helvetica", "I", 10)
-            pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(pdf._text_w, 7, "**Anomaly inspection was not requested.**")
+        if not self.defect_stations:
             pdf.output(pdf_path)
             self.get_logger().info(f"PDF saved: {pdf_path}")
             return
 
+        pdf.add_page()
+        pdf.section_title("Task: Anomaly Detection")
+
         first = True
-        for station in ("green", "red"):
+        for station in sorted(self.defect_stations):
             tiles = self.tiles_per_station.get(station, [])
             if not tiles:
                 continue
@@ -412,7 +435,7 @@ class ReportManager(Node):
                 pdf.section_title("Task: Anomaly Detection")
             first = False
 
-            pdf.subsection("Requested by: Not implemented yet")
+            pdf.subsection(f"Requested by: {self.requested_by}")
             pdf.subsection(f"Station: {station.capitalize()}")
             pdf.ln(2)
             pdf.subsection("Results:")
@@ -484,20 +507,24 @@ class ReportManager(Node):
 **Robot:** BigChungus
 
 ---
+"""
 
-## Task: Ring Counting
-**Requested by:** Not implemented yet
+        if self.rings_requested:
+            text += f"""## Task: Ring Counting
+**Requested by:** {self.requested_by}
 
 ### Results:
 - **Total number of rings detected:** 0
 - **Detected colors:**
-  - {{color1}}: 0
-  - {{color2}}: 0
+  - {color1}: 0
+  - {color2}: 0
 
 ---
+"""
 
-## Task: Barrel Inspection
-**Requested by:** Not implemented yet
+        if self.barrels_requested:
+            text += f"""## Task: Barrel Inspection
+**Requested by:** {self.requested_by}
 
 ### Results:
 - **Total number of barrels inspected:** 0
@@ -507,18 +534,12 @@ class ReportManager(Node):
 | - | - | - | - |
 
 ---
-
-## Task: Anomaly Detection
-
 """
 
-        if not self.tiles_per_station:
-            text += "**Anomaly inspection was not requested.**\n"
-        else:
-            for station in ("green", "red"):
+        if self.defect_stations:
+            text += "## Task: Anomaly Detection\n\n"
+            for station in sorted(self.defect_stations):
                 tiles = self.tiles_per_station.get(station, [])
-                if not tiles:
-                    continue
 
                 total = len(tiles)
                 ok_count = sum(1 for t in tiles if t["status"] == "OK")
@@ -531,7 +552,7 @@ class ReportManager(Node):
 
                 text += f"""
 
-**Requested by:** Not implemented yet
+**Requested by:** {self.requested_by}
 **Station:** {station.capitalize()}
 
 ### Results:

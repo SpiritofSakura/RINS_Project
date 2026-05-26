@@ -130,6 +130,41 @@ def generate_launch_description():
         output='screen',
     )
 
+    qr_reader_node = Node(
+        package='task1',
+        executable='qr_reader',
+        name='qr_reader',
+        output='screen',
+    )
+
+    report_manager_node = Node(
+        package='task1',
+        executable='report_manager',
+        name='report_manager',
+        output='screen',
+    )
+
+    color_mask_viewer_node = Node(
+        package='task1',
+        executable='color_mask_viewer',
+        name='color_mask_viewer',
+        output='screen',
+    )
+
+    line_localizator_node = Node(
+        package='task1',
+        executable='line_localizator',
+        name='line_localizator',
+        output='screen',
+    )
+
+    workstation_recorder_node = Node(
+        package='task1',
+        executable='workstation_recorder',
+        name='workstation_recorder',
+        output='screen',
+    )
+
     # Create launch description and add all nodes
     ld = LaunchDescription([
         detect_people_node,
@@ -145,6 +180,11 @@ def generate_launch_description():
         delayed_cylinder_localizator,
         delayed_cylinder_debug_view,
         orchestrator_node,
+        qr_reader_node,
+        report_manager_node,
+        color_mask_viewer_node,
+        line_localizator_node,
+        workstation_recorder_node,
     ])
     
     return ld

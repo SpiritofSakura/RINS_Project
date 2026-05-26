@@ -51,6 +51,7 @@ setup(
             'orchestrator = task1.orchestrator:main',
             'yellow_line_avoider = task1.yellow_line_avoider:main',
             'pointcloud_viewer = task1.pointcloud_viewer:main',
+            'qr_reader = task1.qr_reader:main',
         ],
     },
 )

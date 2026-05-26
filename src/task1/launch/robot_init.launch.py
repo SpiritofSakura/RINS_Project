@@ -59,6 +59,13 @@ def generate_launch_description():
         output="screen",
     )
 
+    qr_reader_node = Node(
+        package="task1",
+        executable="qr_reader",
+        name="qr_reader",
+        output="screen",
+    )
+
     ld = LaunchDescription([
         arm_camera_viewer_node,
         behavior_manager_node,
@@ -68,6 +75,7 @@ def generate_launch_description():
         overlay_node,
         waypoint_navigator_node,
         blue_line_explorer_node,
+        qr_reader_node,
     ])
 
     return ld
