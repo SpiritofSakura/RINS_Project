@@ -18,11 +18,11 @@ from collections import Counter
 from statistics import median
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-CLUSTER_RADIUS   = 0.45   # m — detections within this radius → same ring
+CLUSTER_RADIUS   = 0.8    # m — detections within this radius → same ring
 FAIR_THRESH      = 2      # detections before showing a temporary candidate marker
 ACTION_THRESH    = 4      # detections before behavior may approach the ring
 CONFIRM_THRESH   = 6      # detections needed to confirm a ring marker solidly
-MIN_MARK_DIST    = 0.5    # m — minimum distance between two confirmed rings
+MIN_MARK_DIST    = 0.8    # m — minimum distance between two confirmed rings
 ACTION_INLIER_RADIUS = 0.30
 MAX_RAW_PTS      = 500    # max points stored per cluster before trimming
 

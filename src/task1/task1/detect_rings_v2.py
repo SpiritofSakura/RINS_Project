@@ -122,7 +122,6 @@ class RingDetectorV2(Node):
         self.colour_pub = self.create_publisher(String, "/ring_colour", 10)
 
         # Debug windows
-        cv2.namedWindow("Disparity", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Hough Circles", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Masked view", cv2.WINDOW_NORMAL)
         
@@ -235,7 +234,7 @@ class RingDetectorV2(Node):
         debug_img = self.rgb_image.copy()
         ring_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
         combined_visualization_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
-        turning_fast = abs(self.turning_speed) > 0.3
+        turning_fast = abs(self.turning_speed) > 0.2
         circle_color = (0, 0, 255) if turning_fast else (0, 255, 0)
         if circles is not None:
             for circle in circles[0]:
@@ -265,16 +264,13 @@ class RingDetectorV2(Node):
         # Apply final mask to RGB image for visualization
         masked_view = cv2.bitwise_and(self.rgb_image, self.rgb_image, mask=final_mask_display)
 
+        h_dbg = debug_img.shape[0]
         cv2.putText(debug_img, f"turn: {self.turning_speed:.2f} rad/s",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                    (10, h_dbg - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 0, 255) if turning_fast else (0, 255, 0), 2)
 
-        cv2.imshow("Disparity", disparity_8u)
         cv2.imshow("Hough Circles", debug_img)
-        cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
         cv2.imshow("Masked view", masked_view)
-        cv2.imshow("Color Mask", full_color_mask)
-        cv2.imshow("Disparity Masked", cv2.bitwise_and(disparity_8u, disparity_8u, mask=final_mask_display))
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
@@ -590,7 +586,7 @@ class RingDetectorV2(Node):
             return
 
         # Skip publishing if turning too fast (motion blur)
-        if abs(self.turning_speed) > 0.3:
+        if abs(self.turning_speed) > 0.2:
             return
 
         if self.image_header is None:
