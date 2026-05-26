@@ -244,17 +244,25 @@ class RingDetectorV2(Node):
         
         # Combine: dilated ring mask AND disparity mask (valid depth)
         combined_mask_display = cv2.bitwise_and(dilated_ring_mask, disparity_mask)
+
+        # ── Color mask (full image) for debug ──
+        hsv_full = cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2HSV)
+        full_color_mask = np.zeros(self.rgb_image.shape[:2], dtype=np.uint8)
+        for colour_name in ("black", "green", "blue", "red"):
+            for lower, upper in COLOUR_RANGES[colour_name]:
+                full_color_mask |= cv2.inRange(hsv_full, lower, upper)
+
+        # Final mask: spatial + disparity + color
+        final_mask_display = cv2.bitwise_and(combined_mask_display, full_color_mask)
         
-        # Apply combined mask (dilated ring + disparity) to RGB image for visualization
-        masked_view = cv2.bitwise_and(self.rgb_image, self.rgb_image, mask=combined_mask_display)
-        
-        # Combine ring mask with color+disparity mask to see intersection
-        combined_visualization = cv2.bitwise_and(ring_mask, combined_mask_display)
+        # Apply final mask to RGB image for visualization
+        masked_view = cv2.bitwise_and(self.rgb_image, self.rgb_image, mask=final_mask_display)
 
         cv2.imshow("Disparity", disparity_8u)
         cv2.imshow("Hough Circles", debug_img)
         cv2.imshow("Color+Disparity Mask", cv2.cvtColor(combined_mask_display, cv2.COLOR_GRAY2BGR))
-        cv2.imshow("Masked view", combined_visualization)
+        cv2.imshow("Masked view", masked_view)
+        cv2.imshow("Color Mask", full_color_mask)
         cv2.waitKey(1)
 
     def robot_state_callback(self, data):
@@ -287,6 +295,14 @@ class RingDetectorV2(Node):
         # Combine: dilated ring circle mask AND disparity mask (valid depth)
         combined_circle_mask = cv2.bitwise_and(dilated_circle_mask, disparity_mask)
 
+        # ── Color filter: keep only pixels matching known ring colors ──
+        hsv_img = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2HSV)
+        color_mask = np.zeros((h, w), dtype=np.uint8)
+        for colour_name in ("black", "green", "blue", "red"):
+            for lower, upper in COLOUR_RANGES[colour_name]:
+                color_mask |= cv2.inRange(hsv_img, lower, upper)
+        combined_circle_mask = cv2.bitwise_and(combined_circle_mask, color_mask)
+
         # Extract ring patch for colour classification
         # Use combined_mask (dilated ring + disparity) to get only valid ring pixels
         patch_size = max(int(radius * 2.5), 64)
@@ -299,10 +315,19 @@ class RingDetectorV2(Node):
         ring_patch = rgb_img[y1:y2, x1:x2].copy()
         patch_mask = combined_circle_mask[y1:y2, x1:x2]
 
+        # ── Mask centroid for precise localisation ──
+        mask_pts = cv2.findNonZero(patch_mask)
+        if mask_pts is not None and len(mask_pts) > 5:
+            centroid = np.mean(mask_pts, axis=0).astype(int)[0]
+            loc_cx = x1 + centroid[0]
+            loc_cy = y1 + centroid[1]
+        else:
+            loc_cx, loc_cy = cx, cy
+
         return {
-            "cx": cx, "cy": cy, "radius": radius,
+            "cx": loc_cx, "cy": loc_cy, "radius": radius,
             "depth_m": centre_depth, "ring_patch": ring_patch,
-            "patch_mask": patch_mask  # Pass mask for color extraction
+            "patch_mask": patch_mask
         }
 
     def _classify_ring_colour_with_mask(self, ring_patch, patch_mask):
