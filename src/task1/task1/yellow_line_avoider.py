@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-Yellow line avoider.
+Yellow line avoider — camera-only, no costmap editing.
 
-Uses the top (downward) camera to detect yellow floor lines in real time.
-Only reacts when the yellow line is in the DANGER zone (very close, bottom
-of the frame) — robot stops, says "Prohibited", and backs away.
+The top (downward) camera watches for yellow floor lines.
+When the line enters the DANGER zone (close, bottom of frame) the robot
+immediately stops, says "Prohibited", and backs away.
 
-Debug image is published to /yellow_line/debug_image (view in RViz or
-rqt_image_view — same pattern as blue_line_explorer).
+Override strategy
+-----------------
+The iRobot Create3 motion_control node accepts velocity from TWO topics:
+  /cmd_vel_unstamped  geometry_msgs/Twist        (task1 nodes, keyboard)
+  /cmd_vel            geometry_msgs/TwistStamped (Nav2 final output)
 
-States
-------
-  CLEAR      No yellow in danger zone.
-  BACKING    Reversing after detecting a prohibited crossing.
+During BACKING the avoider publishes at 50 Hz to BOTH topics, outrunning
+Nav2 (~10-20 Hz) and any teleop node.  When CLEAR the avoider is passive
+and does not interfere with normal driving or navigation.
+
+Debug image → /yellow_line/debug_image  (shown in RViz YellowLineCamera
+panel or rqt_image_view, same pattern as blue_line_explorer).
 """
 
 import subprocess
@@ -21,11 +26,11 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, String
+from std_msgs.msg import String
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -33,59 +38,58 @@ SENSOR_QOS = QoSProfile(
     depth=1,
 )
 
-# HSV range for yellow
 YELLOW_LO = np.array([18, 100, 80], dtype=np.uint8)
 YELLOW_HI = np.array([35, 255, 255], dtype=np.uint8)
-
-MORPH_K = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+MORPH_K   = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
 
 class YellowLineAvoider(Node):
     def __init__(self):
         super().__init__("yellow_line_avoider")
 
-        self.declare_parameter("enabled", True)
-        self.declare_parameter("camera_topic", "/top_camera/rgb/preview/image_raw")
-        self.declare_parameter("cmd_vel_topic", "/cmd_vel_unstamped")
+        self.declare_parameter("enabled",             True)
+        self.declare_parameter("camera_topic",        "/top_camera/rgb/preview/image_raw")
         self.declare_parameter("publish_debug_image", True)
 
-        # Danger zone — fraction of image height from top.
-        # Set low so it only fires when the line is very close (almost under robot).
+        # Danger zone — very close to robot (lower portion of frame)
         self.declare_parameter("danger_zone_top",    0.65)
         self.declare_parameter("danger_zone_bottom", 0.95)
-        # Horizontal crop — ignore image edges (wall reflections)
-        self.declare_parameter("roi_left",  0.15)
-        self.declare_parameter("roi_right", 0.85)
+        # Horizontal crop to ignore wall reflections at edges
+        self.declare_parameter("roi_left",  0.30)
+        self.declare_parameter("roi_right", 0.70)
 
-        # Pixel count to trigger backing
         self.declare_parameter("danger_px_threshold", 300)
-
-        # Backing parameters
         self.declare_parameter("back_speed",    0.12)   # m/s
         self.declare_parameter("back_duration", 1.8)    # seconds
 
-        camera_topic  = self.get_parameter("camera_topic").value
-        cmd_vel_topic = self.get_parameter("cmd_vel_topic").value
+        camera_topic = self.get_parameter("camera_topic").value
 
         self.bridge = CvBridge()
         self.image_sub = self.create_subscription(
             Image, camera_topic, self._image_cb, SENSOR_QOS)
 
-        self.cmd_pub    = self.create_publisher(Twist,  cmd_vel_topic,            10)
-        self.manual_pub = self.create_publisher(Bool,   "/manual_control_active", 10)
-        self.status_pub = self.create_publisher(String, "/yellow_line_status",    10)
+        # /cmd_vel_unstamped — overrides task1 nodes and keyboard teleop
+        self.cmd_unstamped = self.create_publisher(
+            Twist, "/cmd_vel_unstamped", 10)
+        # /cmd_vel — overrides Nav2's collision_monitor TwistStamped output
+        self.cmd_stamped = self.create_publisher(
+            TwistStamped, "/cmd_vel", 10)
+
+        self.status_pub = self.create_publisher(String, "/yellow_line_status",      10)
         self.debug_pub  = self.create_publisher(Image,  "/yellow_line/debug_image", 10)
 
         self.state    = "CLEAR"
         self.back_end = 0.0
         self._spoke   = False
 
-        self.timer = self.create_timer(0.1, self._update)
+        # 50 Hz — faster than Nav2 (~10-20 Hz) and teleop (~10 Hz) so
+        # backing commands win the last-write-wins race on both topics.
+        self.timer = self.create_timer(0.02, self._update)
         self.get_logger().info(
             f"YellowLineAvoider ready on {camera_topic}. "
-            "Debug image: /yellow_line/debug_image")
+            "Overrides /cmd_vel_unstamped + /cmd_vel at 50 Hz during backing.")
 
-    # ── image callback ────────────────────────────────────────────────────────
+    # ── image callback ─────────────────────────────────────────────────────────
 
     def _image_cb(self, msg):
         try:
@@ -93,7 +97,7 @@ class YellowLineAvoider(Node):
         except Exception:
             pass
 
-    # ── main loop ─────────────────────────────────────────────────────────────
+    # ── main loop ──────────────────────────────────────────────────────────────
 
     def _update(self):
         if not self.get_parameter("enabled").value:
@@ -105,7 +109,7 @@ class YellowLineAvoider(Node):
         h, w = img.shape[:2]
         now  = self._now()
 
-        # ── detect ────────────────────────────────────────────────────────────
+        # ── yellow detection ──────────────────────────────────────────────────
         hsv  = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, MORPH_K)
@@ -116,74 +120,66 @@ class YellowLineAvoider(Node):
         dt = int(h * float(self.get_parameter("danger_zone_top").value))
         db = int(h * float(self.get_parameter("danger_zone_bottom").value))
 
-        danger_px    = int(cv2.countNonZero(mask[dt:db, xl:xr]))
+        danger_px     = int(cv2.countNonZero(mask[dt:db, xl:xr]))
         danger_thresh = int(self.get_parameter("danger_px_threshold").value)
 
         # ── state machine ──────────────────────────────────────────────────────
         if self.state == "BACKING":
-            self._pub_bool(self.manual_pub, True)
             if now >= self.back_end:
-                self._stop()
-                self._pub_bool(self.manual_pub, False)
+                # Done backing — zero out both topics once, then go passive
+                self._pub_vel(0.0, 0.0)
                 self.state  = "CLEAR"
                 self._spoke = False
-                self.get_logger().info("Backing done — resuming CLEAR.")
+                self.get_logger().info("Backing done — CLEAR.")
             else:
-                self._pub_twist(-float(self.get_parameter("back_speed").value), 0.0)
+                # Flood both topics at 50 Hz — overrides ALL external commands
+                self._pub_vel(-float(self.get_parameter("back_speed").value), 0.0)
 
         elif danger_px >= danger_thresh:
-            self._pub_bool(self.manual_pub, True)
-            self._stop()
+            # Zero immediately, then schedule the timed reverse
+            self._pub_vel(0.0, 0.0)
             if not self._spoke:
                 self.get_logger().warn(
-                    f"PROHIBITED — yellow in danger zone ({danger_px} px). Backing away.")
+                    f"PROHIBITED — yellow in danger zone ({danger_px} px). Backing.")
                 self._speak("Prohibited")
                 self._spoke   = True
                 self.state    = "BACKING"
                 self.back_end = now + float(self.get_parameter("back_duration").value)
 
         else:
+            # CLEAR — avoider is fully passive; don't publish anything so
+            # Nav2 and manual control work normally without interference.
             if self.state != "CLEAR":
                 self.get_logger().info("CLEAR — no yellow in danger zone.")
-                self._pub_bool(self.manual_pub, False)
             self.state = "CLEAR"
 
-        # ── publish status ────────────────────────────────────────────────────
+        # ── status + debug ────────────────────────────────────────────────────
         self.status_pub.publish(String(
             data=f"state={self.state} danger_px={danger_px}"))
 
-        # ── debug image ───────────────────────────────────────────────────────
         if self.get_parameter("publish_debug_image").value:
             self._publish_debug(img, mask, xl, xr, dt, db,
                                 danger_px, danger_thresh)
 
-    # ── debug ─────────────────────────────────────────────────────────────────
+    # ── debug image ────────────────────────────────────────────────────────────
 
     def _publish_debug(self, img, mask, xl, xr, dt, db,
                        danger_px, danger_thresh):
         debug = img.copy()
 
-        # Yellow mask overlay
         overlay = debug.copy()
         overlay[mask > 0] = (0, 220, 255)
         cv2.addWeighted(overlay, 0.40, debug, 0.60, 0, debug)
 
-        # Contours around yellow blobs
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(debug, contours, -1, (0, 180, 255), 2)
 
-        # Danger zone box
         d_col = (0, 0, 255) if danger_px >= danger_thresh else (80, 80, 80)
         cv2.rectangle(debug, (xl, dt), (xr, db), d_col, 2)
         self._label(debug, f"DANGER {danger_px}px", (xl + 4, dt + 16), d_col)
 
-        # State banner
-        state_colors = {
-            "CLEAR":   (0, 200, 0),
-            "BACKING": (0, 100, 255),
-        }
-        col = state_colors.get(self.state, (200, 200, 200))
+        col = (0, 200, 0) if self.state == "CLEAR" else (0, 100, 255)
         self._label(debug, f"STATE: {self.state}", (8, 20), col)
 
         try:
@@ -191,24 +187,23 @@ class YellowLineAvoider(Node):
         except Exception:
             pass
 
-    # ── helpers ───────────────────────────────────────────────────────────────
+    # ── helpers ────────────────────────────────────────────────────────────────
 
     def _now(self):
         return self.get_clock().now().nanoseconds / 1e9
 
-    def _pub_twist(self, linear, angular):
-        msg = Twist()
-        msg.linear.x  = float(linear)
-        msg.angular.z = float(angular)
-        self.cmd_pub.publish(msg)
+    def _pub_vel(self, linear: float, angular: float):
+        """Publish to both velocity topics simultaneously."""
+        t = Twist()
+        t.linear.x  = linear
+        t.angular.z = angular
+        self.cmd_unstamped.publish(t)
 
-    def _stop(self):
-        self._pub_twist(0.0, 0.0)
-
-    def _pub_bool(self, pub, val):
-        msg = Bool()
-        msg.data = bool(val)
-        pub.publish(msg)
+        ts = TwistStamped()
+        ts.header.stamp    = self.get_clock().now().to_msg()
+        ts.twist.linear.x  = linear
+        ts.twist.angular.z = angular
+        self.cmd_stamped.publish(ts)
 
     @staticmethod
     def _label(img, text, pos, color):
@@ -226,7 +221,7 @@ class YellowLineAvoider(Node):
                 continue
 
     def destroy_node(self):
-        self._stop()
+        self._pub_vel(0.0, 0.0)
         super().destroy_node()
 
 
