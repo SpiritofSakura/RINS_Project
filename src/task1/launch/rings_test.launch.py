@@ -11,6 +11,7 @@ def generate_launch_description():
         executable='detect_rings_v2',
         name='detect_rings_v2',
         output='screen',
+        parameters=[{'override_detection': True}],
     )
 
     # Ring localization node from task1 package
