@@ -43,7 +43,7 @@ class BehaviorManager(Node):
             'ring': 0.35,
             'barrel': 0.65,
         }
-        self.approach_offset = 0.4
+        self.approach_offset = 0.5
 
         # Queue for pending detections (captured before AMCL is ready)
         self.pending_targets = []  # List of {type, x, y, z, color}
@@ -338,7 +338,7 @@ class BehaviorManager(Node):
             return
 
         self.active_target['leak_detected'] = data.get('leak_detected')
-        self.active_target['spill_pixel_count'] = data.get('spill_pixel_count', 0)
+        self.active_target['spill_point_count'] = data.get('spill_point_count', 0)
 
     def main_loop(self):
         if not self.nav_server_ready:
