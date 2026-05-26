@@ -1,79 +1,91 @@
 waypoints:
 
-# Yellow-room-only patrol for map2.yaml.
-# Same-position entries with different yaw values are intentional in-place rotations.
-# yaw values: east=0.0, north=1.5708, west=3.1416, south=-1.5708.
+# yaw: east=0.0  north=1.5708  west=3.1416  south=-1.5708
+# pause: seconds to dwell after arriving before sending the next goal
 
-# START / left-side scan
-- x: -4.60
-  y: -1.10
+# ── Waypoint 1 — 360° scan ────────────────────────────────────────────────────
+- x: 0.648
+  y: -1.614
+  yaw: 0.0       # East
+  pause: 1.0
+- x: 0.648
+  y: -1.614
+  yaw: 1.5708    # North
+  pause: 1.0
+- x: 0.648
+  y: -1.614
+  yaw: 3.1416    # West
+  pause: 1.0
+- x: 0.648
+  y: -1.614
+  yaw: -1.5708   # South
+  pause: 1.0
+
+# ── Waypoint 2 — 270° scan: North → West → South ─────────────────────────────
+- x: 0.023
+  y: -4.385
+  yaw: 1.5708    # North
+  pause: 1.0
+- x: 0.023
+  y: -4.385
+  yaw: 3.1416    # West
+  pause: 1.0
+- x: 0.023
+  y: -4.385
+  yaw: -1.5708   # South
+  pause: 1.0
+
+# ── Waypoint 3 — 270° scan: East → South → West ──────────────────────────────
+- x: -3.070
+  y: -2.942
+  yaw: 0.0       # East
+  pause: 1.0
+- x: -3.070
+  y: -2.942
+  yaw: -1.5708   # South
+  pause: 1.0
+- x: -3.070
+  y: -2.942
+  yaw: 3.1416    # West
+  pause: 1.0
+
+# ── Waypoint 4 — 360° scan ────────────────────────────────────────────────────
+- x: -2.375
+  y: -0.302
+  yaw: 0.0       # East
+  pause: 1.0
+- x: -2.375
+  y: -0.302
+  yaw: 1.5708    # North
+  pause: 1.0
+- x: -2.375
+  y: -0.302
+  yaw: 3.1416    # West
+  pause: 1.0
+- x: -2.375
+  y: -0.302
+  yaw: -1.5708   # South
+  pause: 1.0
+
+# ── Waypoint 5 — 360° scan ────────────────────────────────────────────────────
+- x: -0.120
+  y: -0.801
+  yaw: 0.0       # East
+  pause: 1.0
+- x: -0.120
+  y: -0.801
+  yaw: 1.5708    # North
+  pause: 1.0
+- x: -0.120
+  y: -0.801
+  yaw: 3.1416    # West
+  pause: 1.0
+- x: -0.120
+  y: -0.801
+  yaw: -1.5708   # South
+  pause: 1.0
+
+# ── Waypoint 6 — End pose ─────────────────────────────────────────────────────
+- x: 2.755
+  y: 0.288
   yaw: 0.0
-
-- x: -4.60
-  y: -1.10
-  yaw: 1.5708
-
-- x: -4.60
-  y: -1.10
-  yaw: 3.1416
-
-- x: -4.60
-  y: -1.10
-  yaw: -1.5708
-
-# Lower-left room sweep
-- x: -3.80
-  y: -3.60
-  yaw: -1.5708
-
-# Bottom yellow boundary sweep
-- x: -3.20
-  y: -7.00
-  yaw: 0.0
-
-- x: 0.40
-  y: -7.00
-  yaw: 1.5708
-
-# Lower-right / center scan
-- x: -0.80
-  y: -3.60
-  yaw: 0.0
-
-- x: -0.80
-  y: -3.60
-  yaw: 1.5708
-
-- x: -0.80
-  y: -3.60
-  yaw: 3.1416
-
-- x: -0.80
-  y: -3.60
-  yaw: -1.5708
-
-# Middle room scan
-- x: -2.60
-  y: -0.70
-  yaw: 0.0
-
-- x: -2.60
-  y: -0.70
-  yaw: 1.5708
-
-- x: -2.60
-  y: -0.70
-  yaw: 3.1416
-
-- x: -2.60
-  y: -0.70
-  yaw: -1.5708
-
-# Upper/right side of the yellow room, then finish near the top-left side
-- x: 0.40
-  y: 0.00
-  yaw: 3.1416
-
-- x: -4.40
-  y: 0.00
-  yaw: 3.1416

@@ -41,6 +41,7 @@ class WaypointNavigator(Node):
 
         self.rocaj_cilja = None
         self.rezultat_prihodnost = None
+        self.pause_until = None  # nanoseconds timestamp; robot dwells after arrival
 
         qos_lat = QoSProfile(
             depth=1,
@@ -143,11 +144,19 @@ class WaypointNavigator(Node):
 
         if not self.patrol_omogocen:
             self.prej_patro_om = False
+            self.pause_until = None
             return
 
         if not self.prej_patro_om:
             self.get_logger().info('Resuming patrol...')
             self.prej_patro_om = True
+
+        # Dwell after arrival before sending next goal
+        if self.pause_until is not None:
+            if self.get_clock().now().nanoseconds >= self.pause_until:
+                self.pause_until = None
+                self.poslji_naslednjo_tocko()
+            return
 
         if self.indeks_tocke >= len(self.seznam_tock):
             self.get_logger().info('Vse tocke so opravljene.')
@@ -174,12 +183,16 @@ class WaypointNavigator(Node):
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info(f'Tocka {self.indeks_tocke + 1} dosezena.')
+            pause = float(self.seznam_tock[self.indeks_tocke].get('pause', 0.0))
             self.indeks_tocke += 1
 
             if self.indeks_tocke >= len(self.seznam_tock):
                 self.get_logger().info('Vse tocke so opravljene.')
                 self.koncan = True
                 self.objavi_koncanost(True)
+            elif pause > 0.0:
+                self.pause_until = self.get_clock().now().nanoseconds + int(pause * 1e9)
+                self.get_logger().info(f'Dwelling {pause:.1f}s before next waypoint.')
             elif self.patrol_omogocen:
                 self.poslji_naslednjo_tocko()
 
