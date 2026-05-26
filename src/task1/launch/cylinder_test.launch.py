@@ -20,13 +20,6 @@ def generate_launch_description():
         output='screen',
     )
 
-    behavior_manager_node = Node(
-        package='task1',
-        executable='behavior_manager',
-        name='behavior_manager',
-        output='screen',
-    )
-
     pointcloud_viewer_node = Node(
         package='task1',
         executable='pointcloud_viewer',
@@ -45,7 +38,6 @@ def generate_launch_description():
     )
 
     ld = LaunchDescription([
-        behavior_manager_node,
         pointcloud_viewer_node,
         delayed_cylinder_segmentation,
         delayed_cylinder_localizator,
