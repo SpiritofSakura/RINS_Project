@@ -185,6 +185,11 @@ class ReportManager(Node):
         if msg.ns not in ("ring_confirmed", "ring_actionable"):
             return
         color = self._marker_to_color(msg)
+        if not hasattr(self, '_seen_ring_ids'):
+            self._seen_ring_ids = set()
+        if msg.id in self._seen_ring_ids:
+            return
+        self._seen_ring_ids.add(msg.id)
         self.ring_counts[color] = self.ring_counts.get(color, 0) + 1
 
     def _barrel_callback(self, msg: Marker):
@@ -240,15 +245,11 @@ class ReportManager(Node):
             self.report_counter += 1
 
     def _clear_reports(self):
-        for d in (self.pdf_dir, self.img_barrels_dir, self.img_defects_dir):
-            if os.path.isdir(d):
-                for fname in os.listdir(d):
-                    fpath = os.path.join(d, fname)
-                    if os.path.isfile(fpath):
-                        try:
-                            os.remove(fpath)
-                        except OSError:
-                            pass
+        import shutil
+        report_dir = os.path.dirname(self.pdf_dir)
+        if os.path.isdir(report_dir):
+            shutil.rmtree(report_dir, ignore_errors=True)
+        self._ensure_dirs()
 
         self.report_counter = 0
         self._barrel_image_seq = 0
@@ -258,7 +259,7 @@ class ReportManager(Node):
         self._warped_cache = {}
         self._heatmap_cache = {}
         self._pending_defect = None
-        self._ensure_dirs()
+        self._seen_ring_ids = set()
         self.get_logger().info("Reports cleared")
 
     def _gen_barrel_image_name(self):
@@ -293,6 +294,7 @@ class ReportManager(Node):
         station = msg.data.strip().lower()
         if station in ("green", "red"):
             self._current_station = station
+            self.defect_stations.add(station)
             if station not in self.tiles_per_station:
                 self.tiles_per_station[station] = []
             self.get_logger().info(f"Station set: {station}")
@@ -461,7 +463,7 @@ class ReportManager(Node):
         pdf.cell(0, 7, f"Report: {report_name}", ln=True)
         pdf.ln(6)
 
-        if self.rings_requested:
+        if self.rings_requested or sum(self.ring_counts.values()) > 0:
             total_rings = sum(self.ring_counts.values())
             pdf.section_title("Task: Ring Counting")
             pdf.subsection(f"Requested by: {self.requested_by}")
@@ -481,7 +483,7 @@ class ReportManager(Node):
             pdf.body("Task not requested")
             pdf.ln(4)
 
-        if self.barrels_requested:
+        if self.barrels_requested or len(self.barrel_data) > 0:
             pdf.add_page()
             pdf.section_title("Task: Barrel Inspection")
             pdf.subsection(f"Requested by: {self.requested_by}")
@@ -503,7 +505,7 @@ class ReportManager(Node):
             pdf.body("Task not requested")
             pdf.ln(4)
 
-        if self.barrels_requested and os.path.isdir(self.img_barrels_dir):
+        if (self.barrels_requested or len(self.barrel_data) > 0) and os.path.isdir(self.img_barrels_dir):
             leak_images = sorted(
                 [f for f in os.listdir(self.img_barrels_dir)
                  if f.startswith("leak_") and f.endswith(".jpg")],
@@ -539,7 +541,9 @@ class ReportManager(Node):
                     pdf.set_y(row_y)
                     i += per_row
 
-        if not self.defect_stations:
+        if not self.defect_stations and not any(
+            tiles for tiles in self.tiles_per_station.values()
+        ):
             if self._noqr:
                 pdf.add_page()
                 pdf.section_title("Task: Anomaly Detection")
@@ -637,7 +641,7 @@ class ReportManager(Node):
 ---
 """
 
-        if self.rings_requested:
+        if self.rings_requested or sum(self.ring_counts.values()) > 0:
             total_rings = sum(self.ring_counts.values())
             color_lines = "\n".join(
                 f"  - {c}: {self.ring_counts.get(c, 0)}"
@@ -664,7 +668,7 @@ Task not requested
 ---
 """
 
-        if self.barrels_requested:
+        if self.barrels_requested or len(self.barrel_data) > 0:
             rows = "\n".join(
                 f"| {b['id']} | {b['colour']} | {b['orientation']} | {b['leak_detected']} |"
                 for b in self.barrel_data
@@ -691,7 +695,9 @@ Task not requested
 ---
 """
 
-        if self.defect_stations:
+        if self.defect_stations or any(
+            tiles for tiles in self.tiles_per_station.values()
+        ):
             text += "## Task: Anomaly Detection\n\n"
             for station in sorted(self.defect_stations):
                 tiles = self.tiles_per_station.get(station, [])

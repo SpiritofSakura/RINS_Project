@@ -27,6 +27,13 @@ def generate_launch_description():
         output='screen',
     )
 
+    barrel_inspector_node = Node(
+        package='task1',
+        executable='barrel_inspector',
+        name='barrel_inspector',
+        output='screen',
+    )
+
     delayed_cylinder_segmentation = TimerAction(
         period=6.0,
         actions=[cylinder_segmentation_node],
@@ -41,6 +48,7 @@ def generate_launch_description():
         pointcloud_viewer_node,
         delayed_cylinder_segmentation,
         delayed_cylinder_localizator,
+        barrel_inspector_node,
     ])
 
     return ld

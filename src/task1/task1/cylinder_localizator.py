@@ -295,11 +295,10 @@ class CylinderLocalizator(Node):
 
         if orientation == "horizontal":
             self.get_logger().warn(
-                f"WARNING: Barrel #{barrel_id} ({colour}) is horizontal — behavior_manager will inspect."
+                f"WARNING: Barrel #{barrel_id} ({colour}) is horizontal — barrel_inspector will inspect."
             )
 
-        image_path = self._save_image(barrel_id, leak)
-        self._log_barrel(barrel_id, colour, orientation, leak, cx, cy, image_path)
+        self._log_barrel(barrel_id, colour, orientation, leak, cx, cy, None)
         self._publish_marker(
             barrel_id, cx, cy, cz, colour, orientation,
             confirmed=True, leak_detected=leak

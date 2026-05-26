@@ -5,13 +5,21 @@ source /opt/ros/jazzy/setup.bash
 source "$REPO_DIR/install/setup.bash"
 
 NOQR="false"
+
 for arg in "$@"; do
     case "$arg" in
         --noqr)
             NOQR="true"
             ;;
+        make|clear)
+            CMD="$arg"
+            ;;
     esac
 done
 
-echo "Starting report manager — noqr=$NOQR"
-ros2 run task1 report_manager --ros-args -p noqr:="$NOQR"
+if [ -n "$CMD" ]; then
+    ros2 topic pub --once /report_commands std_msgs/String "data: $CMD"
+else
+    echo "Starting report manager — noqr=$NOQR"
+    ros2 run task1 report_manager --ros-args -p noqr:="$NOQR"
+fi

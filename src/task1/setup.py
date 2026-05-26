@@ -49,6 +49,7 @@ setup(
             'tile_classifier = task1.tile_classifier:main',
             'report_manager = task1.report:main',
             'orchestrator = task1.orchestrator:main',
+            'barrel_inspector = task1.barrel_inspector:main',
             'yellow_line_avoider = task1.yellow_line_avoider:main',
             'pointcloud_viewer = task1.pointcloud_viewer:main',
             'qr_reader = task1.qr_reader:main',

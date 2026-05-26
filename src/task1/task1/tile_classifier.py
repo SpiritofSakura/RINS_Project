@@ -92,29 +92,19 @@ class TileClassifier(Node):
         if scale < 1.0:
             disp_w, disp_h = int(w * scale), int(h * scale)
             disp = cv2.resize(bgr, (disp_w, disp_h))
-            pred_disp = cv2.resize(pred, (disp_w, disp_h), interpolation=cv2.INTER_NEAREST)
             prob_disp = cv2.resize(prob, (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
         else:
-            disp, pred_disp, prob_disp = bgr.copy(), pred.copy(), prob.copy()
+            disp, prob_disp = bgr.copy(), prob.copy()
             disp_h, disp_w = h, w
-
-        overlay = disp.copy()
-        red = np.array([0, 0, 255], dtype=np.uint8)
-        where = pred_disp.astype(bool)
-        overlay[where] = (0.6 * overlay[where] + 0.4 * red).clip(0, 255).astype(np.uint8)
 
         heatmap = cv2.applyColorMap((prob_disp * 255).astype(np.uint8), cv2.COLORMAP_JET)
         blended = cv2.addWeighted(disp, 0.5, heatmap, 0.5, 0)
 
-        panel = np.concatenate([disp, overlay, blended], axis=1)
+        panel = np.concatenate([disp, blended], axis=1)
 
-        color = (0, 200, 0) if label == "OK" else (0, 0, 255)
-        cv2.putText(panel, f"{label}  ({defect_ratio*100:.2f}%)", (5, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
-        for i, lbl in enumerate(["Tile", "Defect overlay", "Probability heatmap"]):
-            x = i * disp_w + 5
-            cv2.putText(panel, lbl, (x, disp_h - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+        color = (0, 255, 0) if label == "OK" else (0, 0, 255)
+        cv2.putText(panel, f"{label} ({defect_ratio*100:.2f}%)", (10, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2, cv2.LINE_AA)
         return panel
 
     def _warped_cb(self, msg):
@@ -125,8 +115,6 @@ class TileClassifier(Node):
             return
 
         self.get_logger().info(f"Received warped tile ({bgr.shape[1]}x{bgr.shape[0]})")
-        cv2.imshow("raw_input", bgr)
-
         try:
             label, defect_ratio, pred, prob = self._classify(bgr)
             self.get_logger().info(f"Classification: {label}  (defect={defect_ratio*100:.2f}%)")

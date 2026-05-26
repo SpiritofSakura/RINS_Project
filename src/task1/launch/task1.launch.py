@@ -123,6 +123,13 @@ def generate_launch_description():
         actions=[cylinder_debug_view_node],
     )
 
+    barrel_inspector_node = Node(
+        package='task1',
+        executable='barrel_inspector',
+        name='barrel_inspector',
+        output='screen',
+    )
+
     orchestrator_node = Node(
         package='task1',
         executable='orchestrator',
@@ -179,6 +186,7 @@ def generate_launch_description():
         delayed_cylinder_segmentation,
         delayed_cylinder_localizator,
         delayed_cylinder_debug_view,
+        barrel_inspector_node,
         orchestrator_node,
         qr_reader_node,
         report_manager_node,

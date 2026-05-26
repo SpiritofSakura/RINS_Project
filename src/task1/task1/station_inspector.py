@@ -605,13 +605,13 @@ class StationInspector(Node):
 
                 if self._tile_stop_start is not None:
                     elapsed_s = (now - self._tile_stop_start).nanoseconds / 1e9
-                    if elapsed_s >= 2.0:
+                    if elapsed_s >= (4.0 if self._end_belt_start is not None else 2.0):
                         self._tile_stop_start = None
                         self._tile_found = False
                         if self._end_belt_start is not None:
                             self.get_logger().info("Final tile done, escaping")
                             self._stop_robot()
-                            self._publish_arm("garage")
+                            self._publish_arm("look_for_spill")
                             self.fine_pos_phase = 5
                             self._publish_substate("ESCAPING_WORKSTATION")
                             self._phase5_sub = 0
@@ -635,7 +635,7 @@ class StationInspector(Node):
                     if elapsed >= 5.0:
                         self.get_logger().info("No tile in 5s without color, escaping")
                         self._stop_robot()
-                        self._publish_arm("garage")
+                        self._publish_arm("look_for_spill")
                         self.fine_pos_phase = 5
                         self._publish_substate("ESCAPING_WORKSTATION")
                         self._phase5_sub = 0

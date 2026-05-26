@@ -2,7 +2,6 @@
 
 import math
 import json
-import os
 import random
 import shutil
 import subprocess
@@ -16,11 +15,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import Bool, String, Empty
-from std_srvs.srv import Trigger
-from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker
-from cv_bridge import CvBridge
-import cv2
 
 
 def yaw_to_quaternion(yaw):
@@ -67,18 +62,7 @@ class BehaviorManager(Node):
         self.interaction_active = False
         self.interaction_end_time = None
         self.interaction_duration = 2.5
-
-        self.waiting_for_spill_check = False
-        self.spill_check_start_time = None
-        self.spill_check_timeout = 60.0  # seconds before giving up waiting
-
-        self.bridge = CvBridge()
-        self._latest_oakd = None
-        self._pending_leak_capture = None
-        self._leak_image_seq = 0
-        self._oakd_sub = self.create_subscription(
-            Image, "/oakd/rgb/preview/image_raw", self._oakd_cb, 10
-        )
+        self.barrel_interaction_duration = 5.0
 
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
@@ -102,13 +86,6 @@ class BehaviorManager(Node):
             "I found a {color} ring. Fashion approved.",
             "A {color} ring. Quite the dramatic choice.",
             "This appears to be a {color} ring. Impressive.",
-        ]
-
-        self.barrel_lines = [
-            "I found a {color} {orientation} barrel. {leak_sentence}",
-            "Barrel inspection complete. The barrel is {color} and {orientation}. {leak_sentence}",
-            "This is a {color} {orientation} barrel. {leak_sentence}",
-            "A {color} barrel has been detected. It is {orientation}. {leak_sentence}",
         ]
 
         qos_latched = QoSProfile(
@@ -175,10 +152,6 @@ class BehaviorManager(Node):
             self.resume_patrol_callback,
             10
         )
-
-        self.spill_check_client = self.create_client(Trigger, '/spill_check')
-        self._pending_spill_future = None
-        self._barrel_result_pub = self.create_publisher(String, '/barrel_inspection_result', 10)
 
         self.amcl_pose_subscriber = self.create_subscription(
             PoseWithCovarianceStamped,
@@ -277,45 +250,14 @@ class BehaviorManager(Node):
         template = random.choice(self.ring_lines)
         return template.format(color=color)
 
-    def _oakd_cb(self, msg):
-        try:
-            self._latest_oakd = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        except Exception:
-            pass
-
-    def _save_leak_image(self):
-        if self._latest_oakd is None:
-            self.get_logger().warn("No OAK-D image available for leak capture")
-            return False
-        leak_dir = os.path.expanduser("~/RINS_Project/reports/img/barrels")
-        os.makedirs(leak_dir, exist_ok=True)
-        filename = f"leak_{self._leak_image_seq:04d}.jpg"
-        self._leak_image_seq += 1
-        path = os.path.join(leak_dir, filename)
-        cv2.imwrite(path, self._latest_oakd)
-        self.get_logger().info(f"Saved leak image: {path}")
-        return True
-
-    def random_barrel_line(self, color, orientation, leak_detected):
-        template = random.choice(self.barrel_lines)
-        if leak_detected is True:
-            leak_sentence = "Warning. It is leaking."
-        elif leak_detected is False:
-            leak_sentence = "No leak detected."
-        else:
-            leak_sentence = "Leak inspection was inconclusive."
-        return template.format(
-            color=color,
-            orientation=orientation,
-            leak_sentence=leak_sentence,
-        )
-
     def start_interaction(self):
+        duration = self.barrel_interaction_duration if self.current_state == 'INTERACT_BARREL' else self.interaction_duration
         self.interaction_active = True
-        self.interaction_end_time = self.get_clock().now().nanoseconds + int(self.interaction_duration * 1e9)
-        text = self.interaction_text()
-        if text:
-            self.speak_text(text)
+        self.interaction_end_time = self.get_clock().now().nanoseconds + int(duration * 1e9)
+        if self.current_state != 'INTERACT_BARREL':
+            text = self.interaction_text()
+            if text:
+                self.speak_text(text)
 
     def interaction_text(self):
         if self.current_state == 'INTERACT_FACE':
@@ -326,22 +268,11 @@ class BehaviorManager(Node):
                 return self.random_ring_line(self.active_target['color'])
             return 'I found a ring. Quite mysterious.'
 
-        if self.current_state == 'INTERACT_BARREL':
-            if self.active_target is None:
-                return 'I found a barrel. Inspection complete.'
-            return self.random_barrel_line(
-                self.active_target.get('color', 'unknown'),
-                self.active_target.get('orientation', 'unknown'),
-                self.active_target.get('leak_detected'),
-            )
-
         return None
 
     def finish_interaction(self):
         self.interaction_active = False
         self.interaction_end_time = None
-        self.waiting_for_spill_check = False
-        self.spill_check_start_time = None
         self.target_done_callback(Empty())
 
 
@@ -378,66 +309,6 @@ class BehaviorManager(Node):
                 self.finish_interaction()
             return
 
-        # While waiting for the spill check to finish, hold here and check for timeout
-        if self.waiting_for_spill_check:
-            if self._pending_spill_future is not None and self._pending_spill_future.done():
-                try:
-                    response = self._pending_spill_future.result()
-                    if response.success:
-                        data = json.loads(response.message)
-                        self.active_target['leak_detected'] = data.get('spill_detected')
-                        self.active_target['spill_point_count'] = data.get('point_count', 0)
-                        self.get_logger().info(
-                            f"Spill check: {data.get('point_count', 0)} pts → "
-                            f"{'SPILL' if data.get('spill_detected') else 'OK'}"
-                        )
-                    else:
-                        err = json.loads(response.message).get('error', 'unknown')
-                        self.get_logger().warn(f'Spill check failed: {err}')
-                        if self.active_target is not None:
-                            self.active_target['leak_detected'] = None
-                except Exception as e:
-                    self.get_logger().warn(f'Spill check error: {e}')
-                    if self.active_target is not None:
-                        self.active_target['leak_detected'] = None
-                self.waiting_for_spill_check = False
-                self.spill_check_start_time = None
-                self._pending_spill_future = None
-                if self.active_target is not None:
-                    result = String()
-                    result.data = json.dumps({
-                        "barrel_id": self.active_target.get("barrel_id"),
-                        "leak_detected": self.active_target.get("leak_detected"),
-                    })
-                    self._barrel_result_pub.publish(result)
-                if (self.active_target is not None
-                        and self.active_target.get('leak_detected')
-                        and self._latest_oakd is not None):
-                    self.get_logger().info("Leak detected — capturing image immediately")
-                    self._save_leak_image()
-                    self._pending_leak_capture = self.get_clock().now().nanoseconds
-                else:
-                    self.start_interaction()
-            elif self.spill_check_start_time is not None:
-                elapsed = (self.get_clock().now().nanoseconds - self.spill_check_start_time) / 1e9
-                if elapsed >= self.spill_check_timeout:
-                    self.get_logger().warn('Spill check timed out — speaking inconclusive result.')
-                    self.waiting_for_spill_check = False
-                    self.spill_check_start_time = None
-                    self._pending_spill_future = None
-                    if self.active_target is not None:
-                        self.active_target['leak_detected'] = None
-                    self.start_interaction()
-            return
-
-        # Leak capture: stay still for 1 second after image, then interact
-        if self._pending_leak_capture is not None:
-            elapsed = (self.get_clock().now().nanoseconds - self._pending_leak_capture) / 1e9
-            if elapsed >= 1.0:
-                self._pending_leak_capture = None
-                self.start_interaction()
-            return
-
         # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
         # This is a FAILSAFE that cancels the stuck nav goal and forces interaction to start
         if self.approach_start_time is not None and self.active_target is not None:
@@ -456,14 +327,7 @@ class BehaviorManager(Node):
                         self.publish_state('INTERACT_BARREL')
                     else:  # APPROACH_RING
                         self.publish_state('INTERACT_RING')
-                    if self.current_state == 'INTERACT_BARREL' and self.active_target is not None and self.active_target.get('is_horizontal', False):
-                        self.get_logger().info('Horizontal barrel (timeout path) — calling spill check service.')
-                        self.waiting_for_spill_check = True
-                        self.spill_check_start_time = self.get_clock().now().nanoseconds
-                        req = Trigger.Request()
-                        self._pending_spill_future = self.spill_check_client.call_async(req)
-                    else:
-                        self.start_interaction()
+                    self.start_interaction()
                     # Do NOT return - let normal interaction logic proceed
 
         if self.result_future is None:
@@ -501,21 +365,7 @@ class BehaviorManager(Node):
             elif nav_goal_type == 'approach_barrel':
                 self.publish_state('INTERACT_BARREL')
                 self.get_logger().info('Reached barrel target. Starting interaction.')
-                if self.active_target is not None and self.active_target.get('is_horizontal', False):
-                    self.get_logger().info('Horizontal barrel — calling spill check service.')
-                    self.waiting_for_spill_check = True
-                    self.spill_check_start_time = self.get_clock().now().nanoseconds
-                    req = Trigger.Request()
-                    self._pending_spill_future = self.spill_check_client.call_async(req)
-                else:
-                    if self.active_target is not None:
-                        result = String()
-                        result.data = json.dumps({
-                            "barrel_id": self.active_target.get("barrel_id"),
-                            "leak_detected": self.active_target.get("leak_detected"),
-                        })
-                        self._barrel_result_pub.publish(result)
-                    self.start_interaction()
+                self.start_interaction()
 
             else:
                 self.get_logger().info('Temporary navigation goal succeeded.')
@@ -928,8 +778,6 @@ class BehaviorManager(Node):
         if self.manual_control_active:
             self.interaction_active = False
             self.interaction_end_time = None
-            self.waiting_for_spill_check = False
-            self.spill_check_start_time = None
             # Clear active target if mid-interaction so refresh_state() can
             # transition to MANUAL_CONTROL/IDLE instead of looping on INTERACT_*
             if self.active_target is not None and self.current_state in (
