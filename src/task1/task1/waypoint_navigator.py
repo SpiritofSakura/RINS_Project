@@ -114,19 +114,24 @@ class WaypointNavigator(Node):
     def preklici_cilj(self):
         if self.rocaj_cilja is not None and self.cilj_aktiven:
             self.get_logger().info('Cancelling current patrol goal...')
-            prihodnost = self.rocaj_cilja.cancel_goal_async()
-            prihodnost.add_done_callback(self.obdelaj_preklic)
+            handle = self.rocaj_cilja
+            prihodnost = handle.cancel_goal_async()
+            prihodnost.add_done_callback(lambda f: self.obdelaj_preklic(f, handle))
 
-    def obdelaj_preklic(self, prihodnost):
+    def obdelaj_preklic(self, prihodnost, cancelled_handle):
         try:
             _ = prihodnost.result()
         except Exception as nap:
             self.get_logger().warn(f'Cancel request failed: {nap}')
 
-        self.cilj_aktiven = False
-        self.cakanje_na_sprejem = False
-        self.rocaj_cilja = None
-        self.rezultat_prihodnost = None
+        # Only wipe state if we haven't already moved on to a new goal.
+        # If a new goal was sent before this callback fired, rocaj_cilja will
+        # no longer be the same handle we cancelled — don't touch anything.
+        if self.rocaj_cilja is cancelled_handle or self.rocaj_cilja is None:
+            self.cilj_aktiven = False
+            self.cakanje_na_sprejem = False
+            self.rocaj_cilja = None
+            self.rezultat_prihodnost = None
 
     def zanka(self):
         if len(self.seznam_tock) == 0:

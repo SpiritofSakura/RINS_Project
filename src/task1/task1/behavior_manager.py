@@ -66,7 +66,7 @@ class BehaviorManager(Node):
 
         self.waiting_for_spill_check = False
         self.spill_check_start_time = None
-        self.spill_check_timeout = 60.0  # seconds before giving up waiting
+        self.spill_check_timeout = 10.0  # seconds before giving up waiting
 
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
@@ -403,11 +403,17 @@ class BehaviorManager(Node):
                     else:  # APPROACH_RING
                         self.publish_state('INTERACT_RING')
                     if self.current_state == 'INTERACT_BARREL' and self.active_target is not None and self.active_target.get('is_horizontal', False):
-                        self.get_logger().info('Horizontal barrel (timeout path) — calling spill check service.')
-                        self.waiting_for_spill_check = True
-                        self.spill_check_start_time = self.get_clock().now().nanoseconds
-                        req = Trigger.Request()
-                        self._pending_spill_future = self.spill_check_client.call_async(req)
+                        if self.spill_check_client.service_is_ready():
+                            self.get_logger().info('Horizontal barrel (timeout path) — calling spill check service.')
+                            self.waiting_for_spill_check = True
+                            self.spill_check_start_time = self.get_clock().now().nanoseconds
+                            req = Trigger.Request()
+                            self._pending_spill_future = self.spill_check_client.call_async(req)
+                        else:
+                            self.get_logger().warn('Spill check service not available (timeout path) — marking inconclusive.')
+                            if self.active_target is not None:
+                                self.active_target['leak_detected'] = None
+                            self.start_interaction()
                     else:
                         self.start_interaction()
                     # Do NOT return - let normal interaction logic proceed
@@ -448,11 +454,17 @@ class BehaviorManager(Node):
                 self.publish_state('INTERACT_BARREL')
                 self.get_logger().info('Reached barrel target. Starting interaction.')
                 if self.active_target is not None and self.active_target.get('is_horizontal', False):
-                    self.get_logger().info('Horizontal barrel — calling spill check service.')
-                    self.waiting_for_spill_check = True
-                    self.spill_check_start_time = self.get_clock().now().nanoseconds
-                    req = Trigger.Request()
-                    self._pending_spill_future = self.spill_check_client.call_async(req)
+                    if self.spill_check_client.service_is_ready():
+                        self.get_logger().info('Horizontal barrel — calling spill check service.')
+                        self.waiting_for_spill_check = True
+                        self.spill_check_start_time = self.get_clock().now().nanoseconds
+                        req = Trigger.Request()
+                        self._pending_spill_future = self.spill_check_client.call_async(req)
+                    else:
+                        self.get_logger().warn('Spill check service not available — skipping, marking inconclusive.')
+                        if self.active_target is not None:
+                            self.active_target['leak_detected'] = None
+                        self.start_interaction()
                 else:
                     self.start_interaction()
 
@@ -509,7 +521,9 @@ class BehaviorManager(Node):
         return self.current_state == 'PATROL'
 
     def accepts_face_detections(self):
-        # Faces also scan during approach/interact so recognition continues while closing in
+        # No face detection during barrel approach/interact
+        if self.current_state in ('APPROACH_BARREL', 'INTERACT_BARREL'):
+            return False
         return self.current_state in ('PATROL', 'APPROACH_FACE', 'INTERACT_FACE')
 
     def is_active_target_match(self, target_type, x, y, color=None):
@@ -580,6 +594,32 @@ class BehaviorManager(Node):
 
         yaw = math.atan2(dy, dx)
         return goal_x, goal_y, yaw
+
+    def compute_barrel_approach_point(self, target_x, target_y):
+        """Approach a horizontal barrel from slightly to the right so the depth
+        camera has a clear view of any spill on the floor beside it."""
+        result = self.compute_approach_point(target_x, target_y)
+        if result is None:
+            return None
+        goal_x, goal_y, goal_yaw = result
+
+        robot_x = self.latest_robot_pose.position.x
+        robot_y = self.latest_robot_pose.position.y
+        dx = target_x - robot_x
+        dy = target_y - robot_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 0.05:
+            return result
+
+        # Right-perpendicular of the approach direction (clockwise 90°)
+        lateral = 0.3  # metres to the right
+        right_x = dy / dist
+        right_y = -dx / dist
+        goal_x += lateral * right_x
+        goal_y += lateral * right_y
+        # Keep yaw pointing toward the barrel
+        goal_yaw = math.atan2(target_y - goal_y, target_x - goal_x)
+        return goal_x, goal_y, goal_yaw
 
     def compute_face_approach_point(self, face_x, face_y, face_yaw):
         # Stand directly in front of the face (along its viewing direction) at 0.3 m
@@ -727,6 +767,8 @@ class BehaviorManager(Node):
         face_yaw = metadata.get('face_yaw') if target_type == 'face' else None
         if face_yaw is not None:
             approach = self.compute_face_approach_point(x, y, face_yaw)
+        elif target_type in ('barrel', 'cylinder') and metadata.get('is_horizontal', False):
+            approach = self.compute_barrel_approach_point(x, y)
         else:
             approach = self.compute_approach_point(x, y)
         if approach is None:

@@ -7,7 +7,7 @@ from statistics import median
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.duration import Duration
 from visualization_msgs.msg import Marker
 from std_msgs.msg import String
@@ -73,9 +73,16 @@ class FaceLocalizator(Node):
 
         self.robot_x = 0.0
         self.robot_y = 0.0
+        self.robot_state = 'IDLE'
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        qos_latched = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
         self.marker_sub = self.create_subscription(
             Marker,
@@ -96,6 +103,13 @@ class FaceLocalizator(Node):
             '/amcl_pose',
             self._amcl_callback,
             10
+        )
+
+        self.robot_state_sub = self.create_subscription(
+            String,
+            '/robot_state',
+            self._robot_state_callback,
+            qos_latched
         )
 
         self.face_locations_pub = self.create_publisher(
@@ -122,6 +136,9 @@ class FaceLocalizator(Node):
         self.robot_x = msg.pose.pose.position.x
         self.robot_y = msg.pose.pose.position.y
 
+    def _robot_state_callback(self, msg: String):
+        self.robot_state = msg.data
+
     def recognized_callback(self, msg):
         try:
             data = json.loads(msg.data)
@@ -133,6 +150,8 @@ class FaceLocalizator(Node):
             pass
 
     def marker_callback(self, marker_msg):
+        if self.robot_state in ('APPROACH_BARREL', 'INTERACT_BARREL'):
+            return
         try:
             x_map, y_map, z_map = self.marker_to_map(marker_msg)
             if not all(math.isfinite(v) for v in (x_map, y_map, z_map)):

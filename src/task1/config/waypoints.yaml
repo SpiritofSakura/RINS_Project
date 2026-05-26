@@ -41,18 +41,10 @@ waypoints:
   yaw: -1.5708   # South
   pause: 1.0
 
-# ── Waypoint 3 — 270° scan: East → South → West ──────────────────────────────
+# ── Waypoint 3 — single pass (East) ──────────────────────────────────────────
 - x: -3.070
   y: -2.942
   yaw: 0.0       # East
-  pause: 1.0
-- x: -3.070
-  y: -2.942
-  yaw: -1.5708   # South
-  pause: 1.0
-- x: -3.070
-  y: -2.942
-  yaw: 3.1416    # West
   pause: 1.0
 
 # ── Waypoint 4 — 360° scan ────────────────────────────────────────────────────
