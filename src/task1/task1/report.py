@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import re
 from datetime import datetime
@@ -8,6 +9,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from sensor_msgs.msg import Image
+from visualization_msgs.msg import Marker
 from cv_bridge import CvBridge
 from fpdf import FPDF
 
@@ -73,6 +75,7 @@ class ReportManager(Node):
         super().__init__("report_manager")
 
         self.declare_parameter("report_dir", REPORT_DIR_DEFAULT)
+        self.declare_parameter("noqr", False)
         report_dir = self.get_parameter("report_dir").value
 
         self.pdf_dir = os.path.join(report_dir, "pdf")
@@ -86,9 +89,14 @@ class ReportManager(Node):
         self.tiles_per_station = {}
         self._current_station = None
         self.rings_requested = False
+        self.ring_counts = {}
         self.barrels_requested = False
+        self.barrel_data = []
         self.defect_stations = set()
         self.requested_by = "Not implemented yet"
+        self._noqr = self.get_parameter("noqr").value
+        if self._noqr:
+            self.get_logger().info("noqr mode: showing all section headers")
         self._warped_cache = {}
         self._heatmap_cache = {}
         self._pending_defect = None
@@ -96,6 +104,15 @@ class ReportManager(Node):
 
         self._ensure_dirs()
 
+        self.ring_sub = self.create_subscription(
+            Marker, "/detected_ring_locations", self._ring_callback, 10
+        )
+        self.barrel_sub = self.create_subscription(
+            Marker, "/detected_cylinder_locations", self._barrel_callback, 10
+        )
+        self.barrel_result_sub = self.create_subscription(
+            String, "/barrel_inspection_result", self._barrel_result_callback, 10
+        )
         self.qr_sub = self.create_subscription(
             String, "/qr", self._qr_callback, 10
         )
@@ -143,6 +160,59 @@ class ReportManager(Node):
             name = msg.data.strip()[7:]
             self.requested_by = name
             self.get_logger().info(f"Task requested by: {name}")
+
+    def _marker_to_color(self, marker: Marker):
+        r, g, b = round(marker.color.r, 2), round(marker.color.g, 2), round(marker.color.b, 2)
+        colors = {
+            (1.0, 0.0, 0.0): "red",
+            (0.0, 1.0, 0.0): "green",
+            (0.0, 0.4, 1.0): "blue",
+            (1.0, 1.0, 0.0): "yellow",
+            (1.0, 0.5, 0.0): "orange",
+            (0.6, 0.0, 1.0): "purple",
+            (0.45, 0.22, 0.08): "brown",
+            (0.1, 0.1, 0.1): "black",
+        }
+        best, best_dist = "unknown", float("inf")
+        for (cr, cg, cb), name in colors.items():
+            d = abs(r - cr) + abs(g - cg) + abs(b - cb)
+            if d < best_dist:
+                best_dist = d
+                best = name
+        return best
+
+    def _ring_callback(self, msg: Marker):
+        if msg.ns not in ("ring_confirmed", "ring_actionable"):
+            return
+        color = self._marker_to_color(msg)
+        self.ring_counts[color] = self.ring_counts.get(color, 0) + 1
+
+    def _barrel_callback(self, msg: Marker):
+        if msg.ns not in ("barrel_confirmed", "cylinder_confirmed"):
+            return
+        color = self._marker_to_color(msg)
+        orientation = msg.text if msg.text in ("horizontal", "vertical") else "unknown"
+        barrel_id = msg.id
+        if not any(b["id"] == barrel_id for b in self.barrel_data):
+            self.barrel_data.append({
+                "id": barrel_id,
+                "colour": color,
+                "orientation": orientation,
+                "leak_detected": "?",
+            })
+            self.get_logger().info(f"Barrel #{barrel_id}: {color} {orientation}")
+
+    def _barrel_result_callback(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            bid = data.get("barrel_id")
+            leak = data.get("leak_detected")
+            for b in self.barrel_data:
+                if b["id"] == bid:
+                    b["leak_detected"] = "Yes" if leak else "No" if leak is False else "?"
+                    break
+        except Exception:
+            pass
 
     def _cmd_callback(self, msg: String):
         cmd = msg.data.strip().lower()
@@ -392,14 +462,23 @@ class ReportManager(Node):
         pdf.ln(6)
 
         if self.rings_requested:
+            total_rings = sum(self.ring_counts.values())
             pdf.section_title("Task: Ring Counting")
             pdf.subsection(f"Requested by: {self.requested_by}")
             pdf.ln(2)
             pdf.body("Results:")
-            pdf.body("- Total number of rings detected:  0")
+            pdf.body(f"- Total number of rings detected:  {total_rings}")
             pdf.body("- Detected colors:")
-            pdf.body("    {color1}: 0")
-            pdf.body("    {color2}: 0")
+            for color in ("red", "green", "blue", "yellow", "orange"):
+                count = self.ring_counts.get(color, 0)
+                if count > 0:
+                    pdf.body(f"    {color}: {count}")
+            if total_rings == 0:
+                pdf.body("    (none)")
+            pdf.ln(4)
+        elif self._noqr:
+            pdf.section_title("Task: Ring Counting")
+            pdf.body("Task not requested")
             pdf.ln(4)
 
         if self.barrels_requested:
@@ -408,15 +487,64 @@ class ReportManager(Node):
             pdf.subsection(f"Requested by: {self.requested_by}")
             pdf.ln(2)
             pdf.body("Results:")
-            pdf.body("- Total number of barrels inspected:  0")
+            pdf.body(f"- Total number of barrels inspected:  {len(self.barrel_data)}")
             pdf.ln(2)
             cols = ("Barrel ID", "Colour", "Orientation", "Leak detected")
             widths = (28, 28, 40, 36)
             pdf.table_header(cols, widths)
-            pdf.table_row(("-", "-", "-", "-"), widths)
+            for b in self.barrel_data:
+                pdf.table_row((str(b["id"]), b["colour"], b["orientation"], b["leak_detected"]), widths)
+            if not self.barrel_data:
+                pdf.table_row(("-", "-", "-", "-"), widths)
+            pdf.ln(4)
+        elif self._noqr:
+            pdf.add_page()
+            pdf.section_title("Task: Barrel Inspection")
+            pdf.body("Task not requested")
             pdf.ln(4)
 
+        if self.barrels_requested and os.path.isdir(self.img_barrels_dir):
+            leak_images = sorted(
+                [f for f in os.listdir(self.img_barrels_dir)
+                 if f.startswith("leak_") and f.endswith(".jpg")],
+                reverse=True,
+            )
+            if leak_images:
+                pdf.set_font("Helvetica", "I", 9)
+                pdf.cell(0, 6, "Leak Evidence:", ln=True)
+                pdf.ln(1)
+                img_w = 50
+                gap = 4
+                per_row = 3
+                row_y = pdf.get_y()
+                i = 0
+                while i < len(leak_images):
+                    row_images = leak_images[i:i + per_row]
+                    col_positions = [
+                        pdf.l_margin + j * (img_w + gap)
+                        for j in range(len(row_images))
+                    ]
+                    pdf.set_font("Helvetica", "", 8)
+                    for j, fname in enumerate(row_images):
+                        seq = int(fname.replace("leak_", "").replace(".jpg", ""))
+                        cx = col_positions[j]
+                        pdf.set_xy(cx, row_y)
+                        pdf.cell(img_w, 5, f"ID: {seq}", align="C")
+                    img_y = row_y + 6
+                    for j, fname in enumerate(row_images):
+                        fpath = os.path.join(self.img_barrels_dir, fname)
+                        if os.path.isfile(fpath):
+                            pdf.image(fpath, x=col_positions[j], y=img_y, w=img_w)
+                    row_y = img_y + img_w * 0.75 + 30
+                    pdf.set_y(row_y)
+                    i += per_row
+
         if not self.defect_stations:
+            if self._noqr:
+                pdf.add_page()
+                pdf.section_title("Task: Anomaly Detection")
+                pdf.body("Task not requested")
+                pdf.ln(4)
             pdf.output(pdf_path)
             self.get_logger().info(f"PDF saved: {pdf_path}")
             return
@@ -510,28 +638,55 @@ class ReportManager(Node):
 """
 
         if self.rings_requested:
+            total_rings = sum(self.ring_counts.values())
+            color_lines = "\n".join(
+                f"  - {c}: {self.ring_counts.get(c, 0)}"
+                for c in ("red", "green", "blue", "yellow", "orange")
+                if self.ring_counts.get(c, 0) > 0
+            ) or "  - (none)"
             text += f"""## Task: Ring Counting
 **Requested by:** {self.requested_by}
 
 ### Results:
-- **Total number of rings detected:** 0
+- **Total number of rings detected:** {total_rings}
 - **Detected colors:**
-  - {color1}: 0
-  - {color2}: 0
+{color_lines}
+
+---
+"""
+        elif self._noqr:
+            text += """## Task: Ring Counting
+**Requested by:** Not implemented yet
+
+### Results:
+Task not requested
 
 ---
 """
 
         if self.barrels_requested:
+            rows = "\n".join(
+                f"| {b['id']} | {b['colour']} | {b['orientation']} | {b['leak_detected']} |"
+                for b in self.barrel_data
+            ) or "| - | - | - | - |"
             text += f"""## Task: Barrel Inspection
 **Requested by:** {self.requested_by}
 
 ### Results:
-- **Total number of barrels inspected:** 0
+- **Total number of barrels inspected:** {len(self.barrel_data)}
 
 | Barrel ID | Colour | Orientation | Leak detected |
 | :---: | :--- | :--- | :---: |
-| - | - | - | - |
+{rows}
+
+---
+"""
+        elif self._noqr:
+            text += """## Task: Barrel Inspection
+**Requested by:** Not implemented yet
+
+### Results:
+Task not requested
 
 ---
 """
@@ -576,6 +731,16 @@ class ReportManager(Node):
                     if hm:
                         text += f"![Defect heatmap]({hm}) "
                     text += "\n\n"
+        elif self._noqr:
+            text += """## Task: Anomaly Detection
+
+**Requested by:** Not implemented yet
+
+### Results:
+Task not requested
+
+---
+"""
 
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(text)
