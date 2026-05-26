@@ -8,4 +8,5 @@ export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export GZ_VERSION=harmonic
 export IGN_IP=127.0.0.1
 
-ros2 launch dis_tutorial7 sim_turtlebot_nav.launch.py map:="$REPO_DIR/map2.yaml"
+
+ros2 launch dis_tutorial7 sim_turtlebot_nav.launch.py 
