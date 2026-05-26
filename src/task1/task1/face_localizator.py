@@ -11,6 +11,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.duration import Duration
 from visualization_msgs.msg import Marker
 from std_msgs.msg import String
+from geometry_msgs.msg import PoseWithCovarianceStamped
 import tf2_ros
 
 
@@ -68,6 +69,10 @@ class FaceLocalizator(Node):
         self.cluster_radius = 0.6
         self.duplicate_radius = 0.8
         self.recognition_radius = 0.8
+        self.max_detection_range = 3.5  # m — ignore faces farther than this
+
+        self.robot_x = 0.0
+        self.robot_y = 0.0
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -83,6 +88,13 @@ class FaceLocalizator(Node):
             String,
             '/recognized_person',
             self.recognized_callback,
+            10
+        )
+
+        self.amcl_sub = self.create_subscription(
+            PoseWithCovarianceStamped,
+            '/amcl_pose',
+            self._amcl_callback,
             10
         )
 
@@ -106,6 +118,10 @@ class FaceLocalizator(Node):
             'Subscribing to /people_marker and /recognized_person'
         )
 
+    def _amcl_callback(self, msg: PoseWithCovarianceStamped):
+        self.robot_x = msg.pose.pose.position.x
+        self.robot_y = msg.pose.pose.position.y
+
     def recognized_callback(self, msg):
         try:
             data = json.loads(msg.data)
@@ -120,6 +136,10 @@ class FaceLocalizator(Node):
         try:
             x_map, y_map, z_map = self.marker_to_map(marker_msg)
             if not all(math.isfinite(v) for v in (x_map, y_map, z_map)):
+                return
+
+            dist_to_robot = math.sqrt((x_map - self.robot_x)**2 + (y_map - self.robot_y)**2)
+            if dist_to_robot > self.max_detection_range:
                 return
 
             recognition = self._best_recognition_near(x_map, y_map)
@@ -225,6 +245,9 @@ class FaceLocalizator(Node):
                 cluster.confirmed = True
                 return
 
+        # Direction robot→face = direction the face is looking (face was visible to robot at detection)
+        face_yaw = math.atan2(self.robot_y - y, self.robot_x - x)
+
         recognition = cluster.best_recognition or self._best_recognition_near(x, y)
         name = recognition.get('name', 'Unknown') if recognition else 'Unknown'
         role = recognition.get('role', '') if recognition else ''
@@ -240,10 +263,11 @@ class FaceLocalizator(Node):
             'gender': gender,
             'confidence': recognition.get('confidence', 0.0) if recognition else 0.0,
             'marker_id': self.marker_id_counter,
+            'face_yaw': face_yaw,
         }
         self.marked_locations.append(entry)
         cluster.confirmed = True
-        self.publish_persistent_marker(x, y, name, role, gender, entry['marker_id'])
+        self.publish_persistent_marker(x, y, name, role, gender, entry['marker_id'], face_yaw)
         self.marker_id_counter += 1
 
         self.get_logger().info(
@@ -279,13 +303,14 @@ class FaceLocalizator(Node):
         best['confidence'] = confidence
 
         self.publish_persistent_marker(
-            best['x'], best['y'], best['name'], best['role'], best['gender'], best['marker_id']
+            best['x'], best['y'], best['name'], best['role'], best['gender'],
+            best['marker_id'], best.get('face_yaw')
         )
         self.get_logger().info(
             f"Updated face marker label: {best['name']} at ({best['x']:.2f}, {best['y']:.2f})"
         )
 
-    def publish_persistent_marker(self, x, y, name, role, gender='', marker_id=None):
+    def publish_persistent_marker(self, x, y, name, role, gender='', marker_id=None, face_yaw=None):
         if marker_id is None:
             marker_id = self.marker_id_counter
             self.marker_id_counter += 1
@@ -300,7 +325,12 @@ class FaceLocalizator(Node):
         sphere.pose.position.x = x
         sphere.pose.position.y = y
         sphere.pose.position.z = 0.0
-        sphere.pose.orientation.w = 1.0
+        # Encode face_yaw in orientation so behavior_manager can approach head-on
+        if face_yaw is not None:
+            sphere.pose.orientation.z = math.sin(face_yaw / 2.0)
+            sphere.pose.orientation.w = math.cos(face_yaw / 2.0)
+        else:
+            sphere.pose.orientation.w = 1.0
         sphere.scale.x = 0.3
         sphere.scale.y = 0.3
         sphere.scale.z = 0.3

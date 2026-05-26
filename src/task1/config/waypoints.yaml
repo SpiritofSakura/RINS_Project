@@ -3,6 +3,12 @@ waypoints:
 # yaw: east=0.0  north=1.5708  west=3.1416  south=-1.5708
 # pause: seconds to dwell after arriving before sending the next goal
 
+# ── Initial turn south before first waypoint ──────────────────────────────────
+- x: 0.0
+  y: 0.0
+  yaw: -1.5708   # South
+  pause: 0.5
+
 # ── Waypoint 1 — 360° scan ────────────────────────────────────────────────────
 - x: 0.648
   y: -1.614

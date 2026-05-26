@@ -581,6 +581,15 @@ class BehaviorManager(Node):
         yaw = math.atan2(dy, dx)
         return goal_x, goal_y, yaw
 
+    def compute_face_approach_point(self, face_x, face_y, face_yaw):
+        # Stand directly in front of the face (along its viewing direction) at 0.3 m
+        dist = 0.3
+        goal_x = face_x + dist * math.cos(face_yaw)
+        goal_y = face_y + dist * math.sin(face_yaw)
+        # Robot looks back toward the face
+        robot_yaw = math.atan2(face_y - goal_y, face_x - goal_x)
+        return goal_x, goal_y, robot_yaw
+
     def send_nav_goal(self, x, y, yaw, nav_goal_type):
         if not self.nav_server_ready:
             self.get_logger().warn('navigate_to_pose server is not ready yet.')
@@ -715,7 +724,11 @@ class BehaviorManager(Node):
             self.get_logger().warn('Ignoring target because /amcl_pose is not available yet.')
             return False
 
-        approach = self.compute_approach_point(x, y)
+        face_yaw = metadata.get('face_yaw') if target_type == 'face' else None
+        if face_yaw is not None:
+            approach = self.compute_face_approach_point(x, y, face_yaw)
+        else:
+            approach = self.compute_approach_point(x, y)
         if approach is None:
             self.get_logger().warn('Could not compute an approach goal.')
             return False
@@ -767,21 +780,16 @@ class BehaviorManager(Node):
         y = msg.pose.position.y
         z = msg.pose.position.z
 
-        self.queue_target({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None})
+        # Extract face-toward-robot yaw encoded in marker orientation (set by face_localizator)
+        qz = msg.pose.orientation.z
+        qw = msg.pose.orientation.w
+        face_yaw = 2.0 * math.atan2(qz, qw)
+
+        self.queue_target({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None, 'face_yaw': face_yaw})
 
     def ring_callback(self, msg: Marker):
-        if not self.accepts_new_detections():
-            return
-
-        if msg.ns and msg.ns not in ('ring_confirmed', 'ring_actionable'):
-            return
-
-        x = msg.pose.position.x
-        y = msg.pose.position.y
-        z = msg.pose.position.z
-
-        color = self.marker_to_ring_color(msg)
-        self.queue_target({'type': 'ring', 'x': x, 'y': y, 'z': z, 'color': color})
+        # Rings no longer require approach or interaction — detection only
+        pass
 
     def cylinder_callback(self, msg: Marker):
         if not self.accepts_new_detections():
@@ -790,13 +798,17 @@ class BehaviorManager(Node):
         if msg.ns and msg.ns not in ('barrel_confirmed', 'cylinder_confirmed'):
             return
 
+        is_horizontal = (msg.text == 'horizontal')
+        if not is_horizontal:
+            # Vertical (standing) barrels need no approach — detection only
+            return
+
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
 
         color = self.marker_to_ring_color(msg)
-        is_horizontal = (msg.text == 'horizontal')
-        orientation = 'horizontal' if is_horizontal else 'vertical'
+        orientation = 'horizontal'
 
         self.queue_target({
             'type': 'barrel',
