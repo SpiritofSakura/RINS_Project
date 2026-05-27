@@ -143,7 +143,8 @@ class RingLocalizator(Node):
             f"cluster_r={CLUSTER_RADIUS} m, confirm={CONFIRM_THRESH} detections")
 
     _INACTIVE_STATES = frozenset((
-        'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+        'FINISHING_ROUNDS', 'LINE_FOLLOWING', 'FOLLOW_BLUE_LINE',
+        'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
     ))
 
     def robot_state_callback(self, msg: String):

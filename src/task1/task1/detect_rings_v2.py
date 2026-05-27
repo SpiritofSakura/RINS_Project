@@ -245,8 +245,9 @@ class RingDetectorV2(Node):
         cv2.waitKey(1)
 
     _INACTIVE_STATES = frozenset((
-        'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL',
-        'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+        'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL', 'FINISHING_ROUNDS',
+        'LINE_FOLLOWING', 'FOLLOW_BLUE_LINE', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW',
+        'BLUE_LINE_DEAD_END',
     ))
 
     def robot_state_callback(self, data):

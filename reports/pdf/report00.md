@@ -5,7 +5,7 @@
 
 ---
 ## Task: Ring Counting
-**Requested by:** Jeff
+**Requested by:** Elena
 
 ### Results:
 - **Total number of rings detected:** 4
@@ -16,29 +16,27 @@
 
 ---
 ## Task: Barrel Inspection
-**Requested by:** Jeff
+**Requested by:** Anita
 
 ### Results:
-- **Total number of barrels inspected:** 9
+- **Total number of barrels inspected:** 7
 
 | Barrel ID | Colour | Orientation | Leak detected |
 | :---: | :--- | :--- | :---: |
-| 1 | green | vertical | No |
-| 2 | blue | horizontal | No |
-| 3 | black | vertical | No |
-| 4 | green | vertical | No |
-| 5 | red | vertical | No |
-| 6 | black | vertical | No |
-| 7 | yellow | vertical | No |
-| 8 | green | vertical | No |
-| 9 | yellow | vertical | No |
+| 1 | green | vertical | ? |
+| 2 | green | vertical | ? |
+| 3 | blue | horizontal | Yes |
+| 4 | black | vertical | ? |
+| 5 | red | vertical | ? |
+| 6 | black | vertical | ? |
+| 7 | yellow | vertical | ? |
 
 ---
 ## Task: Anomaly Detection
 
 
 
-**Requested by:** Jeff
+**Requested by:** Robert
 **Station:** Red
 
 ### Results:

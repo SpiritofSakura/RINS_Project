@@ -102,5 +102,16 @@ waypoints:
   yaw: -1.5708   # South
   pause: 1.0
 
+
+  #7 Waypoint
+- x: 0.95
+  y: 0.340
+  yaw: 3.14 #East
+  pause: 2.0
+- x: 0.941
+  y: 0.340
+  yaw: 3.14 #East
+  pause: 2.0
+
 # ── Final waypoint is handled by behavior_manager after workstation visit ─────
 # (x=2.755, y=0.288, yaw=0.0 — declared as final_wp_x/y/yaw parameters)

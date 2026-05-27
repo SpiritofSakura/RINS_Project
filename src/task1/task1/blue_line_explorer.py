@@ -162,8 +162,8 @@ class BlueLineExplorer(Node):
             self._start()
 
     def _robot_state_callback(self, msg: String):
-        if msg.data == 'LINE_FOLLOWING' and not self.enabled:
-            self.get_logger().info('LINE_FOLLOWING — waiting for explicit blue-line enable.')
+        if msg.data in ('LINE_FOLLOWING', 'FOLLOW_BLUE_LINE') and not self.enabled:
+            self.get_logger().info('Blue-line state received — waiting for explicit enable.')
             self.debug_view = True
 
     def _hazard_callback(self, msg):
@@ -198,7 +198,7 @@ class BlueLineExplorer(Node):
         self.line_lost_since = None
         self._pub_bool(self.manual_pub, True)
         self._pub_bool(self.patrol_cmd_pub, False)
-        self._pub_state("BLUE_LINE_SEARCH")
+        self._pub_state("FOLLOW_BLUE_LINE")
         self.get_logger().info("Blue-line explorer enabled.")
 
     def _finish(self, reason="done"):
@@ -384,26 +384,26 @@ class BlueLineExplorer(Node):
                 self.mode = "SEARCH"
                 self._stop()
             else:
-                # Rotate clockwise (negative = CW) to re-approach from the right side.
+                # Rotate left at the end/recovery point.
                 self._pub_twist(
-                    0.0, -float(self.get_parameter("uturn_angular_speed").value))
+                    0.0, float(self.get_parameter("uturn_angular_speed").value))
             return
 
         # ── Search ───────────────────────────────────────────────────────────
         if self.mode == "SEARCH":
-            self._pub_state("BLUE_LINE_SEARCH")
+            self._pub_state("FOLLOW_BLUE_LINE")
             if cx_norm is not None:
                 self.get_logger().info("Blue line acquired.")
                 self.mode = "FOLLOW"
                 self.line_lost_since = None
             else:
-                # Rotate clockwise slowly until the line is found.
+                # Rotate left slowly until the line is found.
                 spd = float(self.get_parameter("uturn_angular_speed").value)
-                self._pub_twist(0.0, -spd * 0.5)
+                self._pub_twist(0.0, spd * 0.5)
             return
 
         # ── Follow ───────────────────────────────────────────────────────────
-        self._pub_state("BLUE_LINE_FOLLOW")
+        self._pub_state("FOLLOW_BLUE_LINE")
 
         if self.front_dist <= float(self.get_parameter("lidar_stop_distance").value):
             self._start_uturn("obstacle ahead")

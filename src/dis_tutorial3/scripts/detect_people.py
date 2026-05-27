@@ -53,7 +53,7 @@ class detect_faces(Node):
 		self.get_logger().info(f"Node has been initialized! Will publish face markers to {marker_topic}.")
 
 	_INACTIVE_STATES = frozenset((
-		'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL',
+		'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL', 'FINISHING_ROUNDS',
 	))
 
 	def _state_callback(self, msg):

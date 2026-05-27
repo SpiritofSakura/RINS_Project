@@ -28,12 +28,12 @@ from std_msgs.msg import String
 import tf2_ros
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-CLUSTER_RADIUS      = 0.30  # m — stable merge radius for repeated sightings
-CLUSTER_RADIUS_H    = 0.65  # m — horizontal/front-facing cylinders vary more
+CLUSTER_RADIUS      = 0.33  # m — stable merge radius for repeated sightings
+CLUSTER_RADIUS_H    = 0.70  # m — horizontal/front-facing cylinders vary more
 FAIR_THRESH         = 4     # detections before showing a temporary candidate marker
 CONFIRM_THRESH      = 10    # detections before confirming
 MIN_MARK_DIST       = 0.18  # m — physical overlap guard; touching barrels are ~0.22 m apart
-SAME_COLOUR_SUPPRESS_RADIUS   = 0.45
+SAME_COLOUR_SUPPRESS_RADIUS   = 0.48
 SAME_COLOUR_SUPPRESS_RADIUS_H = 1.5   # horizontal barrels: centroid varies more with viewing angle
 COMPACT_INLIER_RADIUS = 0.32
 MAX_RAW_PTS         = 300
@@ -193,7 +193,8 @@ class CylinderLocalizator(Node):
         )
 
     _INACTIVE_STATES = frozenset((
-        'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+        'FINISHING_ROUNDS', 'LINE_FOLLOWING', 'FOLLOW_BLUE_LINE',
+        'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
     ))
 
     def robot_state_callback(self, msg: String):

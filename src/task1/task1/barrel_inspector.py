@@ -33,6 +33,8 @@ class BarrelInspector(Node):
         self._leak_image_seq = 0
         self._seen_barrel_ids = set()
         self._latest_barrel = None
+        self._latest_horizontal_barrel = None
+        self._barrels_by_id = {}
 
         self.cylinder_sub = self.create_subscription(
             Marker, "/detected_cylinder_locations", self._cylinder_callback, 10
@@ -93,32 +95,50 @@ class BarrelInspector(Node):
             "color": color,
             "orientation": orientation,
         }
+        self._barrels_by_id[msg.id] = self._latest_barrel
 
         if orientation == "vertical":
             self.get_logger().info(
-                f"Vertical barrel id={msg.id} color={color} — no leak possible"
+                f"Vertical barrel id={msg.id} color={color} — leak defaults to no"
             )
             self._publish_result(msg.id, False)
-            self._speak_barrel(color, orientation, False)
             return
 
+        self._latest_horizontal_barrel = self._latest_barrel
         self.get_logger().info(
-            f"New horizontal barrel id={msg.id} color={color} — running spill check"
+            f"New horizontal barrel id={msg.id} color={color} — publishing null placeholder until approach"
         )
-        self._run_spill_check(self._latest_barrel)
+        self._publish_result(msg.id, None)
 
     def _trigger_callback(self, msg: String):
-        cmd = msg.data.strip().lower()
-        if cmd != "check":
-            self.get_logger().warn(f"Unknown trigger command: {cmd}")
+        parts = msg.data.strip().lower().split()
+        if not parts or parts[0] != "check":
+            self.get_logger().warn(f"Unknown trigger command: {msg.data.strip()}")
             return
-        if self._latest_barrel is None:
-            self.get_logger().warn("No barrel known yet — trigger ignored")
+
+        barrel = None
+        if len(parts) >= 2:
+            try:
+                barrel = self._barrels_by_id.get(int(parts[1]))
+            except ValueError:
+                self.get_logger().warn(f"Invalid barrel id in trigger: {parts[1]}")
+                return
+        else:
+            barrel = self._latest_horizontal_barrel
+
+        if barrel is None:
+            self.get_logger().warn("No matching horizontal barrel known yet — trigger ignored")
             return
+        if barrel.get("orientation") != "horizontal":
+            self.get_logger().warn(
+                f"Ignoring spill check for vertical barrel id={barrel['barrel_id']}"
+            )
+            return
+
         self.get_logger().info(
-            f"Manual spill check triggered for barrel id={self._latest_barrel['barrel_id']}"
+            f"Spill check triggered for approached barrel id={barrel['barrel_id']}"
         )
-        self._run_spill_check(self._latest_barrel)
+        self._run_spill_check(barrel)
 
     def _run_spill_check(self, barrel):
         if not self.spill_check_client.wait_for_service(timeout_sec=2.0):
@@ -142,13 +162,15 @@ class BarrelInspector(Node):
         self._pending_barrel = None
 
         leak_detected = None
+        point_count = None
         try:
             response = future.result()
             if response.success:
                 data = json.loads(response.message)
                 leak_detected = data.get("spill_detected")
+                point_count = data.get("point_count", 0)
                 self.get_logger().info(
-                    f"Spill check: {data.get('point_count', 0)} pts → "
+                    f"Spill check: {point_count} pts → "
                     f"{'SPILL' if leak_detected else 'OK'}"
                 )
             else:
@@ -158,16 +180,17 @@ class BarrelInspector(Node):
             self.get_logger().warn(f"Spill check error: {e}")
 
         if barrel is not None:
-            self._publish_result(barrel["barrel_id"], leak_detected)
+            self._publish_result(barrel["barrel_id"], leak_detected, point_count)
             self._speak_barrel(barrel["color"], barrel["orientation"], leak_detected)
             if leak_detected:
                 self._save_leak_image()
 
-    def _publish_result(self, barrel_id, leak_detected):
+    def _publish_result(self, barrel_id, leak_detected, point_count=None):
         msg = String()
         msg.data = json.dumps({
             "barrel_id": barrel_id,
             "leak_detected": leak_detected,
+            "point_count": point_count,
         })
         self.result_pub.publish(msg)
 

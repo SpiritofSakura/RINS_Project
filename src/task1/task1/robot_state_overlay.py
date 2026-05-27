@@ -16,6 +16,9 @@ DOVOLJENA_STANJA = {
     'INTERACT_RING',
     'APPROACH_BARREL',
     'INTERACT_BARREL',
+    'APPROACH_WORKSTATION',
+    'WORKSTATION',
+    'FINISHING_ROUNDS',
     'INSPECTOR_INACTIVE',
     'LOAD_YAML',
     'NAV_TO_WS',
@@ -25,6 +28,8 @@ DOVOLJENA_STANJA = {
     'TILE_FOUND',
     'MOVE_NEXT',
     'FINISHED',
+    'FOLLOW_BLUE_LINE',
+    'LINE_FOLLOWING',
     'BLUE_LINE_SEARCH',
     'BLUE_LINE_FOLLOW',
     'BLUE_LINE_INTERSECTION',
@@ -182,7 +187,14 @@ class RobotStateOverlay(Node):
             bar.a = 1.0
             return bar
 
-        if self.trenutno_stanje.startswith('BLUE_LINE_'):
+        if self.trenutno_stanje in {'FINISHING_ROUNDS'}:
+            bar.r = 0.0
+            bar.g = 1.0
+            bar.b = 0.5
+            bar.a = 1.0
+            return bar
+
+        if self.trenutno_stanje in {'FOLLOW_BLUE_LINE', 'LINE_FOLLOWING'} or self.trenutno_stanje.startswith('BLUE_LINE_'):
             bar.r = 0.1
             bar.g = 0.7
             bar.b = 1.0
@@ -215,7 +227,13 @@ class RobotStateOverlay(Node):
         msg.text_size = 18.0
         msg.font = 'DejaVu Sans Mono'
 
-        msg.text = f'ROBOT STATE\n{self.trenutno_stanje}'
+        labels = {
+            'FINISHING_ROUNDS': 'FINISHING ROUNDS',
+            'FOLLOW_BLUE_LINE': 'FOLLOW BLUE LINE',
+            'LINE_FOLLOWING': 'FOLLOW BLUE LINE',
+        }
+        shown_state = labels.get(self.trenutno_stanje, self.trenutno_stanje)
+        msg.text = f'ROBOT STATE\n{shown_state}'
 
         self.pub_overlay.publish(msg)
 

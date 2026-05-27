@@ -220,8 +220,9 @@ class YellowLineAvoider(Node):
         if not self.get_parameter("enabled").value or not self.runtime_enabled:
             return False
         return self.robot_state not in (
-            'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL',
-            'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+            'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL', 'FINISHING_ROUNDS',
+            'LINE_FOLLOWING', 'FOLLOW_BLUE_LINE', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW',
+            'BLUE_LINE_DEAD_END',
         )
 
     def _pub_vel(self, linear: float, angular: float):

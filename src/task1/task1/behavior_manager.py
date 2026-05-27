@@ -44,6 +44,7 @@ class BehaviorManager(Node):
             'barrel': 0.65,
         }
         self.approach_offset = 0.4
+        self.face_approach_offset = 0.35
 
         # Queue for pending detections (captured before AMCL is ready)
         self.pending_targets = []  # List of {type, x, y, z, color}
@@ -62,27 +63,24 @@ class BehaviorManager(Node):
         self.interaction_active = False
         self.interaction_end_time = None
         self.interaction_duration = 2.5
-        self.barrel_interaction_duration = 5.0
+        self.barrel_interaction_duration = 10.0
 
 
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
         self.approach_timeout = 15.0  # seconds
+        self.barrel_approach_timeout = 60.0  # seconds
+        self.skip_barrel_after_cancel = False
 
-        # Direct drive toward face after Nav2 gets as close as it can
-        self.face_direct_drive = False
-        self.face_direct_drive_target = None   # (x, y) of face in map
-        self.face_direct_drive_end = None      # deadline nanoseconds
-        self.face_direct_drive_stop_dist = 0.20  # m — close enough for interaction
+        self.face_qr_turn_active = False
+        self.face_qr_turn_end = None
+        self.face_qr_turn_target = None
+        self.face_qr_turn_duration = 2.0
+        self.face_qr_turn_speed = 0.45
 
-        # Final-waypoint 360° scan before blue-line following
+        # Final waypoint handoff before blue-line following
         self.final_wp_spin_active = False
         self.final_wp_spin_end = 0.0
-        self.final_look_back_active = False
-        self.final_look_back_yaw = None
-        self.final_look_back_hold_start = None
-        self.final_look_back_align_deadline = None
-        self.final_look_back_hold_duration = 1.0
         self.final_nav_failures = 0
         self.blue_line_runtime_started = False
 
@@ -203,6 +201,7 @@ class BehaviorManager(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel_unstamped', 10)
         self.blue_line_pub = self.create_publisher(Bool, '/blue_line_enabled', 10)
         self.yellow_line_pub = self.create_publisher(Bool, '/yellow_line_enabled', 10)
+        self.spill_check_trigger_pub = self.create_publisher(String, '/spill_check_trigger', 10)
 
         self.qr_sub = self.create_subscription(String, '/qr', self.qr_callback, 10)
         self.workstation_markers_sub = self.create_subscription(
@@ -311,10 +310,32 @@ class BehaviorManager(Node):
         duration = self.barrel_interaction_duration if self.current_state == 'INTERACT_BARREL' else self.interaction_duration
         self.interaction_active = True
         self.interaction_end_time = self.get_clock().now().nanoseconds + int(duration * 1e9)
-        if self.current_state != 'INTERACT_BARREL':
+        if self.current_state == 'INTERACT_BARREL':
+            self.trigger_spill_check_for_active_barrel()
+        else:
             text = self.interaction_text()
             if text:
                 self.speak_text(text)
+
+    def trigger_spill_check_for_active_barrel(self):
+        if self.active_target is None:
+            return
+        if self.active_target.get('spill_check_triggered'):
+            return
+        if self.active_target.get('orientation') != 'horizontal':
+            self.active_target['spill_check_triggered'] = True
+            self.get_logger().info('Vertical barrel interaction — no spill check needed.')
+            return
+        barrel_id = self.active_target.get('barrel_id')
+        if barrel_id is None:
+            self.get_logger().warn('Reached barrel target, but active target has no barrel_id for spill check.')
+            return
+
+        msg = String()
+        msg.data = f'check {int(barrel_id)}'
+        self.spill_check_trigger_pub.publish(msg)
+        self.active_target['spill_check_triggered'] = True
+        self.get_logger().info(f'Triggered spill check for approached barrel id={barrel_id}.')
 
     def interaction_text(self):
         if self.current_state == 'INTERACT_FACE':
@@ -366,15 +387,10 @@ class BehaviorManager(Node):
                 self.workstation_start_time = self.get_clock().now().nanoseconds
             return
 
-        # Direct-drive toward face: bypasses Nav2 costmap for the final ~0.5 m.
-        if self.face_direct_drive:
-            self._update_face_direct_drive()
-            return
-
-        # Final waypoint: face back toward the path we came from for 1 s,
-        # then enter the lean blue-line runtime.
-        if self.final_look_back_active:
-            self._update_final_look_back()
+        # After seeing a face during blue-line mode, keep rotating briefly so
+        # the QR reader gets a wider view before the face approach starts.
+        if self.face_qr_turn_active:
+            self._update_face_qr_turn()
             return
 
         # Legacy final spin guard; kept harmless if an older path sets it.
@@ -428,10 +444,19 @@ class BehaviorManager(Node):
                 self.finish_interaction()
             return
 
-        # Approach timeout: auto-transition to interact if 15 seconds elapsed without reaching target
-        # This is a FAILSAFE that cancels the stuck nav goal and forces interaction to start
+        # Approach timeout: auto-transition to interact for lightweight targets only.
+        # Barrels must wait for the real Nav2 result so spill checks happen at the barrel.
         if self.approach_start_time is not None and self.active_target is not None:
-            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING', 'APPROACH_BARREL') and self.nav_goal_type in ('approach_face', 'approach_ring', 'approach_barrel'):
+            if self.current_state == 'APPROACH_BARREL' and self.nav_goal_type == 'approach_barrel':
+                elapsed = (self.get_clock().now().nanoseconds - self.approach_start_time) / 1e9
+                if elapsed >= self.barrel_approach_timeout:
+                    self.get_logger().warn(
+                        f'Barrel approach timeout ({self.barrel_approach_timeout}s) reached. '
+                        'Skipping barrel interaction and resuming navigation.')
+                    self._skip_active_barrel_after_timeout()
+                    return
+
+            if self.current_state in ('APPROACH_FACE', 'APPROACH_RING') and self.nav_goal_type in ('approach_face', 'approach_ring'):
                 elapsed = (self.get_clock().now().nanoseconds - self.approach_start_time) / 1e9
                 if elapsed >= self.approach_timeout:
                     self.get_logger().warn(
@@ -442,8 +467,6 @@ class BehaviorManager(Node):
                     # Gracefully transition to interact - use same interaction flow as normal
                     if self.current_state == 'APPROACH_FACE':
                         self.publish_state('INTERACT_FACE')
-                    elif self.current_state == 'APPROACH_BARREL':
-                        self.publish_state('INTERACT_BARREL')
                     else:  # APPROACH_RING
                         self.publish_state('INTERACT_RING')
                     self.start_interaction()
@@ -472,18 +495,6 @@ class BehaviorManager(Node):
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             if nav_goal_type == 'approach_face':
-                # Nav2 got as close as the costmap allows — drive the rest straight.
-                if (self.active_target is not None and self.latest_robot_pose is not None):
-                    fx = self.active_target['x']
-                    fy = self.active_target['y']
-                    rx = self.latest_robot_pose.position.x
-                    ry = self.latest_robot_pose.position.y
-                    remaining = math.sqrt((fx - rx) ** 2 + (fy - ry) ** 2)
-                    if remaining > self.face_direct_drive_stop_dist:
-                        self.get_logger().info(
-                            f'Face {remaining:.2f} m away — switching to direct drive.')
-                        self._start_face_direct_drive(fx, fy)
-                        return
                 self.publish_state('INTERACT_FACE')
                 self.get_logger().info('Reached face target. Starting interaction.')
                 self.start_interaction()
@@ -505,8 +516,8 @@ class BehaviorManager(Node):
 
             elif nav_goal_type == 'approach_final':
                 self.final_nav_failures = 0
-                self.get_logger().info('At final waypoint — looking back for 1 s before blue-line.')
-                self._start_final_look_back()
+                self.get_logger().info('At final waypoint — enabling blue-line runtime.')
+                self._start_blue_line_runtime()
 
             else:
                 self.get_logger().info('Temporary navigation goal succeeded.')
@@ -531,7 +542,7 @@ class BehaviorManager(Node):
                 attempt = self.active_target.get('face_approach_attempt', 0) + 1
                 self.active_target['face_approach_attempt'] = attempt
                 face_yaw = self.active_target.get('face_yaw')
-                retry_dists = [0.6, 1.0]  # fallback distances after the initial 0.3 m
+                retry_dists = [0.6, 1.0]  # fallback distances after the initial face approach
                 if face_yaw is not None and attempt <= len(retry_dists):
                     dist = retry_dists[attempt - 1]
                     fx = self.active_target['x']
@@ -589,11 +600,13 @@ class BehaviorManager(Node):
     def accepts_face_detections(self):
         if self.current_state in ('APPROACH_BARREL', 'INTERACT_BARREL'):
             return False
-        if self.current_state in ('APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL'):
+        if self.current_state in ('APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL',
+                                  'FINISHING_ROUNDS'):
             return False
         # Allow face detection in the room (line-following phase)
         if self.current_state in (
-            'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+            'LINE_FOLLOWING', 'FOLLOW_BLUE_LINE', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW',
+            'BLUE_LINE_DEAD_END',
         ):
             return True
         return self.current_state in ('PATROL', 'APPROACH_FACE', 'INTERACT_FACE')
@@ -667,13 +680,11 @@ class BehaviorManager(Node):
         yaw = math.atan2(dy, dx)
         return goal_x, goal_y, yaw
 
-    def compute_barrel_approach_point(self, target_x, target_y):
-        """Approach a horizontal barrel from slightly to the right so the depth
-        camera has a clear view of any spill on the floor beside it."""
-        result = self.compute_approach_point(target_x, target_y)
-        if result is None:
+    def compute_barrel_approach_point(self, target_x, target_y, approach_offset=None, lateral_offset=0.3):
+        """Approach a barrel with a configurable stand-off and lateral shift.
+        Positive lateral offset is robot-right; negative is robot-left."""
+        if self.latest_robot_pose is None:
             return None
-        goal_x, goal_y, goal_yaw = result
 
         robot_x = self.latest_robot_pose.position.x
         robot_y = self.latest_robot_pose.position.y
@@ -681,21 +692,29 @@ class BehaviorManager(Node):
         dy = target_y - robot_y
         dist = math.sqrt(dx * dx + dy * dy)
         if dist < 0.05:
-            return result
+            return None
+
+        offset = self.approach_offset if approach_offset is None else approach_offset
+        if dist <= offset:
+            goal_x = robot_x
+            goal_y = robot_y
+        else:
+            factor = (dist - offset) / dist
+            goal_x = robot_x + dx * factor
+            goal_y = robot_y + dy * factor
 
         # Right-perpendicular of the approach direction (clockwise 90°)
-        lateral = 0.3  # metres to the right
         right_x = dy / dist
         right_y = -dx / dist
-        goal_x += lateral * right_x
-        goal_y += lateral * right_y
+        goal_x += lateral_offset * right_x
+        goal_y += lateral_offset * right_y
         # Keep yaw pointing toward the barrel
         goal_yaw = math.atan2(target_y - goal_y, target_x - goal_x)
         return goal_x, goal_y, goal_yaw
 
     def compute_face_approach_point(self, face_x, face_y, face_yaw):
-        # Stand directly in front of the face (along its viewing direction) at 0.3 m
-        dist = 0.3
+        # Stand directly in front of the face.
+        dist = self.face_approach_offset
         goal_x = face_x + dist * math.cos(face_yaw)
         goal_y = face_y + dist * math.sin(face_yaw)
         # Robot looks back toward the face
@@ -778,6 +797,38 @@ class BehaviorManager(Node):
         self.nav_goal_type = None
         self.approach_start_time = None  # Reset timer when goal is cancelled
 
+        if self.skip_barrel_after_cancel:
+            self.skip_barrel_after_cancel = False
+            skipped_target = self.active_target
+            if skipped_target is not None:
+                self.handled_targets.append(skipped_target)
+                self.get_logger().info(
+                    f"Skipped barrel target -> x={skipped_target['x']:.2f}, "
+                    f"y={skipped_target['y']:.2f}"
+                )
+            self.active_target = None
+            self.refresh_state()
+
+    def _skip_active_barrel_after_timeout(self):
+        if self.active_target is None:
+            return
+        self.interaction_active = False
+        self.interaction_end_time = None
+        if self.goal_active:
+            self.skip_barrel_after_cancel = True
+            self.cancel_temporary_goal()
+            return
+
+        skipped_target = self.active_target
+        self.handled_targets.append(skipped_target)
+        self.get_logger().info(
+            f"Skipped barrel target -> x={skipped_target['x']:.2f}, "
+            f"y={skipped_target['y']:.2f}"
+        )
+        self.active_target = None
+        self.approach_start_time = None
+        self.refresh_state()
+
     def refresh_state(self, force_publish=False):
         if self.manual_control_active and self.active_target is None:
             self.publish_patrol_enabled(False)
@@ -849,8 +900,13 @@ class BehaviorManager(Node):
         face_yaw = metadata.get('face_yaw') if target_type == 'face' else None
         if face_yaw is not None:
             approach = self.compute_face_approach_point(x, y, face_yaw)
-        elif target_type in ('barrel', 'cylinder') and metadata.get('is_horizontal', False):
-            approach = self.compute_barrel_approach_point(x, y)
+        elif target_type in ('barrel', 'cylinder'):
+            approach = self.compute_barrel_approach_point(
+                x,
+                y,
+                metadata.get('barrel_approach_offset'),
+                metadata.get('barrel_lateral_offset', 0.3),
+            )
         else:
             approach = self.compute_approach_point(x, y)
         if approach is None:
@@ -901,6 +957,9 @@ class BehaviorManager(Node):
         if not self.accepts_face_detections():
             return
 
+        if self.face_qr_turn_active:
+            return
+
         x = msg.pose.position.x
         y = msg.pose.position.y
         z = msg.pose.position.z
@@ -910,11 +969,17 @@ class BehaviorManager(Node):
         qw = msg.pose.orientation.w
         face_yaw = 2.0 * math.atan2(qz, qw)
 
-        if self.current_state == 'MANUAL_CONTROL':
-            self.get_logger().info('Face detected during manual control — disabling blue-line explorer.')
+        blue_line_states = (
+            'FOLLOW_BLUE_LINE', 'LINE_FOLLOWING',
+            'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+        )
+        if self.current_state in blue_line_states:
+            self.get_logger().info('Face detected during blue-line mode — switching to face approach.')
             disable_msg = Bool()
             disable_msg.data = False
             self.blue_line_enabled_pub.publish(disable_msg)
+            self.blue_line_pub.publish(disable_msg)
+            self._stop_direct_drive()
             wait = False
         else:
             wait = True
@@ -935,7 +1000,7 @@ class BehaviorManager(Node):
 
         is_horizontal = (msg.text == 'horizontal')
         if not is_horizontal:
-            # Vertical (standing) barrels need no approach — detection only
+            # Vertical (standing) barrels need no approach — detection/report only
             return
 
         x = msg.pose.position.x
@@ -943,9 +1008,8 @@ class BehaviorManager(Node):
         z = msg.pose.position.z
 
         color = self.marker_to_ring_color(msg)
-        orientation = 'horizontal'
-
-        self.queue_target({
+        orientation = 'horizontal' if is_horizontal else 'vertical'
+        target = {
             'type': 'barrel',
             'x': x,
             'y': y,
@@ -956,7 +1020,13 @@ class BehaviorManager(Node):
             'barrel_id': msg.id,
             'leak_detected': False if not is_horizontal else None,
             'wait_for_group_end': True,  # hold until current waypoint rotations finish
-        })
+        }
+
+        if is_horizontal:
+            target['barrel_approach_offset'] = 0.5
+            target['barrel_lateral_offset'] = 0.3
+
+        self.queue_target(target)
 
     def target_done_callback(self, msg: Empty):
         if self.active_target is None:
@@ -967,17 +1037,21 @@ class BehaviorManager(Node):
             self.get_logger().info('Target done received, but current state is not target handling.')
             return
 
-        self.handled_targets.append(self.active_target)
+        completed_target = self.active_target
+        self.handled_targets.append(completed_target)
 
         self.get_logger().info(
-            f"Target completed -> type={self.active_target['type']}, "
-            f"x={self.active_target['x']:.2f}, y={self.active_target['y']:.2f}"
+            f"Target completed -> type={completed_target['type']}, "
+            f"x={completed_target['x']:.2f}, y={completed_target['y']:.2f}"
         )
 
         if self.goal_active:
             self.cancel_temporary_goal()
 
         self.active_target = None
+        if completed_target.get('type') == 'face' and self.blue_line_runtime_started:
+            self._resume_blue_line_runtime_after_face()
+            return
         self.refresh_state()
 
     def resume_patrol_callback(self, msg: Empty):
@@ -1031,49 +1105,31 @@ class BehaviorManager(Node):
             self.get_logger().info(
                 f'Patrol group ended — {len(deferred)} barrel(s) now ready, pausing patrol.')
 
-    def _start_face_direct_drive(self, face_x, face_y):
-        self.face_direct_drive = True
-        self.face_direct_drive_target = (face_x, face_y)
-        self.face_direct_drive_end = self.get_clock().now().nanoseconds + int(8.0 * 1e9)
-
-    def _update_face_direct_drive(self):
-        if self.latest_robot_pose is None:
-            return
-
-        rx = self.latest_robot_pose.position.x
-        ry = self.latest_robot_pose.position.y
-        fx, fy = self.face_direct_drive_target
-        dist = math.sqrt((fx - rx) ** 2 + (fy - ry) ** 2)
-        now = self.get_clock().now().nanoseconds
-
-        if dist <= self.face_direct_drive_stop_dist or now >= self.face_direct_drive_end:
-            self._stop_direct_drive()
-            self.face_direct_drive = False
-            self.face_direct_drive_target = None
-            self.face_direct_drive_end = None
-            self.get_logger().info(f'Direct drive done (dist={dist:.2f} m). Starting interaction.')
-            self.publish_state('INTERACT_FACE')
-            self.start_interaction()
-            return
-
-        # Compute bearing to face and robot yaw
-        bearing = math.atan2(fy - ry, fx - rx)
-        q = self.latest_robot_pose.orientation
-        robot_yaw = 2.0 * math.atan2(q.z, q.w)
-
-        angle_err = bearing - robot_yaw
-        while angle_err > math.pi:
-            angle_err -= 2 * math.pi
-        while angle_err < -math.pi:
-            angle_err += 2 * math.pi
-
-        angular = max(-0.6, min(0.6, 1.5 * angle_err))
-        linear = 0.0 if abs(angle_err) > 0.3 else 0.20
-
+    def _start_face_qr_turn(self):
+        self.face_qr_turn_active = True
+        self.face_qr_turn_target = None
+        self.face_qr_turn_end = (
+            self.get_clock().now().nanoseconds
+            + int(self.face_qr_turn_duration * 1e9)
+        )
         twist = Twist()
-        twist.linear.x = float(linear)
-        twist.angular.z = float(angular)
+        twist.angular.z = float(self.face_qr_turn_speed)
         self.cmd_vel_pub.publish(twist)
+
+    def _update_face_qr_turn(self):
+        now = self.get_clock().now().nanoseconds
+        if self.face_qr_turn_end is not None and now < self.face_qr_turn_end:
+            twist = Twist()
+            twist.angular.z = float(self.face_qr_turn_speed)
+            self.cmd_vel_pub.publish(twist)
+            return
+
+        self._stop_direct_drive()
+        self.face_qr_turn_active = False
+        self.face_qr_turn_end = None
+        self.face_qr_turn_target = None
+        self.manual_control_active = False
+        self.get_logger().info('Face QR sweep done — robot stopped.')
 
     def _stop_direct_drive(self):
         self.cmd_vel_pub.publish(Twist())
@@ -1133,24 +1189,11 @@ class BehaviorManager(Node):
         yaw = float(self.get_parameter('final_wp_yaw').value)
         if reset_failures:
             self.final_nav_failures = 0
-        if self.latest_robot_pose is not None:
-            dx = self.latest_robot_pose.position.x - x
-            dy = self.latest_robot_pose.position.y - y
-            if math.hypot(dx, dy) > 0.05:
-                yaw = math.atan2(dy, dx)
-        self.final_look_back_yaw = yaw
-        self.get_logger().info(f'Navigating to final waypoint ({x:.2f}, {y:.2f}).')
+        self.get_logger().info(f'Navigating to final waypoint ({x:.2f}, {y:.2f}, yaw={yaw:.2f}).')
         self.publish_yellow_line_enabled(False)
-        self.publish_state('APPROACH_FINAL')
+        self.publish_state('FINISHING_ROUNDS')
         self.publish_patrol_enabled(False)
         self.send_nav_goal(x, y, yaw, 'approach_final')
-
-    def _start_final_look_back(self):
-        self.final_look_back_active = True
-        self.final_look_back_hold_start = None
-        self.final_look_back_align_deadline = (
-            self.get_clock().now().nanoseconds + int(3.0 * 1e9)
-        )
 
     @staticmethod
     def _angle_error(target, current):
@@ -1161,46 +1204,26 @@ class BehaviorManager(Node):
             err += 2.0 * math.pi
         return err
 
-    def _update_final_look_back(self):
-        now_ns = self.get_clock().now().nanoseconds
-        target_yaw = self.final_look_back_yaw
-
-        if target_yaw is not None and self.latest_robot_pose is not None:
-            q = self.latest_robot_pose.orientation
-            current_yaw = 2.0 * math.atan2(q.z, q.w)
-            err = self._angle_error(target_yaw, current_yaw)
-            if abs(err) > 0.08 and now_ns < self.final_look_back_align_deadline:
-                twist = Twist()
-                twist.angular.z = max(-0.5, min(0.5, 1.2 * err))
-                self.cmd_vel_pub.publish(twist)
-                return
-
-        if self.final_look_back_hold_start is None:
-            self._stop_direct_drive()
-            self.final_look_back_hold_start = now_ns
-            return
-
-        if (now_ns - self.final_look_back_hold_start) / 1e9 < self.final_look_back_hold_duration:
-            self._stop_direct_drive()
-            return
-
-        self._stop_direct_drive()
-        self.final_look_back_active = False
-        self.final_look_back_hold_start = None
-        self.final_look_back_align_deadline = None
-        self._start_blue_line_runtime()
-
     def _start_blue_line_runtime(self):
         if self.blue_line_runtime_started:
             return
         self.blue_line_runtime_started = True
         self.get_logger().info(
-            'Final look-back done — enabling blue-line runtime and shutting down nonessential nodes.')
-        self.publish_state('LINE_FOLLOWING')
+            'Final waypoint reached — enabling blue-line runtime and shutting down nonessential nodes.')
+        self.publish_state('FOLLOW_BLUE_LINE')
         self._shutdown_nonessential_runtime_nodes()
         m = Bool()
         m.data = True
         self.blue_line_pub.publish(m)
+
+    def _resume_blue_line_runtime_after_face(self):
+        self.get_logger().info('Face interaction done — resuming blue-line following.')
+        self.publish_state('FOLLOW_BLUE_LINE')
+        self.publish_patrol_enabled(False)
+        msg = Bool()
+        msg.data = True
+        self.blue_line_enabled_pub.publish(msg)
+        self.blue_line_pub.publish(msg)
 
     def _shutdown_nonessential_runtime_nodes(self):
         keep_patterns = (
@@ -1209,6 +1232,7 @@ class BehaviorManager(Node):
             'face_localizator',
             'blue_line_explorer',
             'behavior_manager',
+            'robot_state_overlay',
             'report_manager',
             'qr_reader',
         )
@@ -1224,7 +1248,6 @@ class BehaviorManager(Node):
             'color_mask_viewer',
             'workstation_recorder',
             'waypoint_navigator',
-            'robot_state_overlay',
             'station_inspector',
             'tile_detect',
             'tile_classifier',
