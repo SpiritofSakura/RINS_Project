@@ -69,7 +69,7 @@ class FaceLocalizator(Node):
         self.cluster_radius = 0.6
         self.duplicate_radius = 0.8
         self.recognition_radius = 0.8
-        self.max_detection_range = 3.5  # m — ignore faces farther than this
+        self.max_detection_range = 2.5  # m — ignore faces farther than this
 
         self.robot_x = 0.0
         self.robot_y = 0.0

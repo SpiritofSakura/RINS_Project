@@ -227,7 +227,7 @@ class StationInspector(Node):
         dy = np.abs(np.diff(gray.astype(np.int16), axis=0)).astype(np.uint16)
         dy_norm = (dy / (dy.max() + 1e-6) * 255).astype(np.uint8)
 
-        top = dy_norm[:max(1, h // 3), :]
+        top = dy_norm[:max(1, h // 2), :]
         blur = cv2.GaussianBlur(top, (3, 3), 0)
         _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -475,7 +475,7 @@ class StationInspector(Node):
                     h, w = self.latest_gray.shape
                     dy = np.abs(np.diff(self.latest_gray.astype(np.int16), axis=0)).astype(np.uint16)
                     dy_norm = (dy / (dy.max() + 1e-6) * 255).astype(np.uint8)
-                    top = dy_norm[:max(1, h // 3), :]
+                    top = dy_norm[:max(1, h // 2), :]
                     blur = cv2.GaussianBlur(top, (3, 3), 0)
                     _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                     vis = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)

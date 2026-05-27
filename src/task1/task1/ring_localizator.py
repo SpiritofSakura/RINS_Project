@@ -122,11 +122,14 @@ class RingLocalizator(Node):
         # We receive position markers and colour strings separately.
         # Buffer the latest colour so we can pair it with the next marker.
         self._latest_colour = "unknown"
+        self.robot_state = 'IDLE'
 
         self.marker_sub = self.create_subscription(
             Marker, '/ring_marker', self.marker_callback, SENSOR_QOS)
         self.colour_sub = self.create_subscription(
             String, '/ring_colour', self.colour_callback, SENSOR_QOS)
+        self.robot_state_sub = self.create_subscription(
+            String, '/robot_state', self.robot_state_callback, 10)
 
         self.ring_locations_pub = self.create_publisher(
             Marker, '/detected_ring_locations', 10)
@@ -139,12 +142,23 @@ class RingLocalizator(Node):
             f"RingLocalizator ready — "
             f"cluster_r={CLUSTER_RADIUS} m, confirm={CONFIRM_THRESH} detections")
 
+    _INACTIVE_STATES = frozenset((
+        'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+    ))
+
+    def robot_state_callback(self, msg: String):
+        self.robot_state = msg.data
+
     # ──────────────────────────────────────────────────────────────────────────
     def colour_callback(self, msg: String):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         self._latest_colour = msg.data
 
     # ──────────────────────────────────────────────────────────────────────────
     def marker_callback(self, marker_msg: Marker):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         try:
             x, y, z = self._marker_to_map(marker_msg)
             if not all(math.isfinite(v) for v in (x, y, z)):

@@ -24,6 +24,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker
+from std_msgs.msg import String
 import tf2_ros
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
@@ -165,12 +166,16 @@ class CylinderLocalizator(Node):
 
         self.bridge = CvBridge()
         self.latest_image = None
+        self.robot_state = 'IDLE'
 
         self.marker_sub = self.create_subscription(
             Marker, "cylinder_markers", self.marker_callback, SENSOR_QOS
         )
         self.image_sub = self.create_subscription(
             Image, "/oakd/rgb/preview/image_raw", self._image_callback, SENSOR_QOS
+        )
+        self.robot_state_sub = self.create_subscription(
+            String, "/robot_state", self.robot_state_callback, 10
         )
         self.cylinder_locations_pub = self.create_publisher(
             Marker, "/detected_cylinder_locations", 10
@@ -187,8 +192,17 @@ class CylinderLocalizator(Node):
             f"CylinderLocalizator ready — report: {REPORT_JSON}"
         )
 
+    _INACTIVE_STATES = frozenset((
+        'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+    ))
+
+    def robot_state_callback(self, msg: String):
+        self.robot_state = msg.data
+
     # ── Image buffer ──────────────────────────────────────────────────────────
     def _image_callback(self, msg: Image):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         try:
             self.latest_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except CvBridgeError:
@@ -216,6 +230,8 @@ class CylinderLocalizator(Node):
 
     # ── Detection ─────────────────────────────────────────────────────────────
     def marker_callback(self, msg: Marker):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         try:
             x, y, z = self._marker_to_map(msg)
         except tf2_ros.TransformException as ex:

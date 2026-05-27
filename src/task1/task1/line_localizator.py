@@ -7,6 +7,7 @@ from sensor_msgs_py import point_cloud2 as pc2
 from cv_bridge import CvBridge, CvBridgeError
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
+from std_msgs.msg import String
 from builtin_interfaces.msg import Duration
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
@@ -57,6 +58,7 @@ class LineLocalizator(Node):
         self.pointcloud_xyz = None
         self.pointcloud_frame_id = None
         self.image_header = None
+        self.robot_state = 'IDLE'
 
         self.declare_parameter("max_flat_std", 0.03)
 
@@ -76,12 +78,21 @@ class LineLocalizator(Node):
             Image, "/oakd/rgb/preview/depth", self.depth_callback, SENSOR_QOS)
         self.pointcloud_sub = self.create_subscription(
             PointCloud2, "/oakd/rgb/preview/depth/points", self.pointcloud_callback, SENSOR_QOS)
+        self.robot_state_sub = self.create_subscription(
+            String, "/robot_state", self.robot_state_callback, 10)
 
         self.marker_pub = self.create_publisher(Marker, "/line_markers", 10)
 
         self.marker_id_counter = 0
 
         self.get_logger().info("LineLocalizator ready.")
+
+    _INACTIVE_STATES = frozenset((
+        'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+    ))
+
+    def robot_state_callback(self, msg: String):
+        self.robot_state = msg.data
 
     def _load_params(self):
         self.ranges = {}
@@ -95,12 +106,16 @@ class LineLocalizator(Node):
                 )
 
     def depth_callback(self, data):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         try:
             self.depth_raw = self.bridge.imgmsg_to_cv2(data, "16UC1")
         except CvBridgeError:
             return
 
     def pointcloud_callback(self, data):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         try:
             pts_xyz = pc2.read_points_numpy(data, field_names=("x", "y", "z"))
             if pts_xyz is None or len(pts_xyz) == 0:
@@ -200,6 +215,8 @@ class LineLocalizator(Node):
         self.marker_pub.publish(marker)
 
     def image_callback(self, data):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         if self.depth_raw is None or self.pointcloud_xyz is None:
             return
 

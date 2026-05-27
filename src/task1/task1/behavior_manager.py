@@ -12,10 +12,10 @@ from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Quaternion, Twist
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import Bool, String, Empty
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 def yaw_to_quaternion(yaw):
@@ -43,7 +43,7 @@ class BehaviorManager(Node):
             'ring': 0.35,
             'barrel': 0.65,
         }
-        self.approach_offset = 0.5
+        self.approach_offset = 0.4
 
         # Queue for pending detections (captured before AMCL is ready)
         self.pending_targets = []  # List of {type, x, y, z, color}
@@ -67,6 +67,36 @@ class BehaviorManager(Node):
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
         self.approach_timeout = 15.0  # seconds
+
+        # Direct drive toward face after Nav2 gets as close as it can
+        self.face_direct_drive = False
+        self.face_direct_drive_target = None   # (x, y) of face in map
+        self.face_direct_drive_end = None      # deadline nanoseconds
+        self.face_direct_drive_stop_dist = 0.20  # m — close enough for interaction
+
+        # Final-waypoint 360° scan before blue-line following
+        self.final_wp_spin_active = False
+        self.final_wp_spin_end = 0.0
+        self.final_look_back_active = False
+        self.final_look_back_yaw = None
+        self.final_look_back_hold_start = None
+        self.final_look_back_align_deadline = None
+        self.final_look_back_hold_duration = 1.0
+        self.final_nav_failures = 0
+        self.blue_line_runtime_started = False
+
+        # Post-patrol: workstation visit + final waypoint
+        self.pending_workstation_color = None   # set by QR code
+        self.workstation_positions = {}          # color → (x, y, yaw)
+        self.workstation_done_flag = False
+        self.workstation_start_time = None
+        self.workstation_timeout = 60.0          # seconds at workstation before giving up
+        self.post_patrol_active = False
+        self.need_post_patrol = False
+
+        self.declare_parameter('final_wp_x', 2.755)
+        self.declare_parameter('final_wp_y', 0.288)
+        self.declare_parameter('final_wp_yaw', 0.0)
 
         self.face_lines = [
             "Hello there. I come in peace.",
@@ -167,6 +197,16 @@ class BehaviorManager(Node):
             10
         )
 
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel_unstamped', 10)
+        self.blue_line_pub = self.create_publisher(Bool, '/blue_line_enabled', 10)
+        self.yellow_line_pub = self.create_publisher(Bool, '/yellow_line_enabled', 10)
+
+        self.qr_sub = self.create_subscription(String, '/qr', self.qr_callback, 10)
+        self.workstation_markers_sub = self.create_subscription(
+            MarkerArray, '/workstation_markers', self.workstation_markers_callback, 10)
+        self.workstation_done_sub = self.create_subscription(
+            Empty, '/workstation_done', self.workstation_done_callback, 10)
+
         self.timer = self.create_timer(0.2, self.main_loop)
 
         self.refresh_state(force_publish=True)
@@ -190,6 +230,11 @@ class BehaviorManager(Node):
         msg = Bool()
         msg.data = enabled
         self.patrol_enabled_publisher.publish(msg)
+
+    def publish_yellow_line_enabled(self, enabled):
+        msg = Bool()
+        msg.data = enabled
+        self.yellow_line_pub.publish(msg)
 
     def amcl_pose_callback(self, msg: PoseWithCovarianceStamped):
         self.latest_robot_pose = msg.pose.pose
@@ -291,20 +336,77 @@ class BehaviorManager(Node):
                 self.get_logger().info('Behavior manager connected to navigate_to_pose.')
             return
 
-        # Process pending detections only after navigation is ready. Confirmed markers
-        # may be one-shot publications, so never pop them before they can become goals.
+        # Start post-patrol sequence once the robot is free and all queued interactions done.
+        if (self.need_post_patrol and self.active_target is None
+                and not self.interaction_active and self.result_future is None
+                and not self.pending_targets):
+            self.need_post_patrol = False
+            self._start_post_patrol_sequence()
+            return
+
+        # Workstation dwell: hold until /workstation_done fires or timeout.
+        if self.current_state == 'WORKSTATION':
+            if self.workstation_done_flag:
+                self.workstation_done_flag = False
+                self.workstation_start_time = None
+                self.pending_workstation_color = None
+                self._navigate_to_final_wp()
+                return
+            if (self.workstation_start_time is not None
+                    and (self.get_clock().now().nanoseconds - self.workstation_start_time) / 1e9
+                    >= self.workstation_timeout):
+                self.get_logger().warn('Workstation timeout — proceeding to final waypoint.')
+                self.workstation_start_time = None
+                self.pending_workstation_color = None
+                self._navigate_to_final_wp()
+            return
+
+        # Direct-drive toward face: bypasses Nav2 costmap for the final ~0.5 m.
+        if self.face_direct_drive:
+            self._update_face_direct_drive()
+            return
+
+        # Final waypoint: face back toward the path we came from for 1 s,
+        # then enter the lean blue-line runtime.
+        if self.final_look_back_active:
+            self._update_final_look_back()
+            return
+
+        # Legacy final spin guard; kept harmless if an older path sets it.
+        if self.final_wp_spin_active:
+            now_ns = self.get_clock().now().nanoseconds
+            if now_ns < self.final_wp_spin_end:
+                twist = Twist()
+                twist.angular.z = 1.0
+                self.cmd_vel_pub.publish(twist)
+                return
+            self._stop_direct_drive()
+            self.final_wp_spin_active = False
+            self._start_blue_line_runtime()
+            return
+
+        # Process pending detections only after navigation is ready.
+        # Faces are highest priority; barrels are processed only when no face is pending.
+        _TARGET_PRIORITY = {'face': 0, 'barrel': 1, 'cylinder': 1, 'ring': 2}
         if self.amcl_pose_ready and self.pending_targets and self.active_target is None:
-            # Scan for the first ready target. Barrels marked wait_for_group_end are
-            # held until the current waypoint rotation group finishes.
-            for i, target in enumerate(self.pending_targets):
-                if self.is_already_handled(target['type'], target['x'], target['y'], target.get('color')):
+            # Purge stale (already-handled) entries first.
+            for i in range(len(self.pending_targets) - 1, -1, -1):
+                t = self.pending_targets[i]
+                if self.is_already_handled(t['type'], t['x'], t['y'], t.get('color')):
                     self.pending_targets.pop(i)
-                    self.get_logger().info(f"Queued {target['type']} detection already handled, skipping.")
-                    break
-                if target.get('wait_for_group_end', False):
-                    continue  # deferred — skip until group_end fires
+                    self.get_logger().info(
+                        f"Queued {t['type']} detection already handled, skipping.")
+            # Collect non-deferred targets and sort faces before barrels.
+            ready = [
+                (i, t) for i, t in enumerate(self.pending_targets)
+                if not t.get('wait_for_group_end', False)
+            ]
+            ready.sort(key=lambda it: _TARGET_PRIORITY.get(it[1]['type'], 2))
+            if ready:
+                i, target = ready[0]
                 self.get_logger().info(
-                    f'Processing queued {target["type"]} detection (x={target["x"]:.2f}, y={target["y"]:.2f})')
+                    f'Processing queued {target["type"]} detection '
+                    f'(x={target["x"]:.2f}, y={target["y"]:.2f})')
                 metadata = {
                     key: value for key, value in target.items()
                     if key not in ('type', 'x', 'y', 'z', 'color', 'wait_for_group_end')
@@ -314,7 +416,6 @@ class BehaviorManager(Node):
                     target.get('color'), **metadata
                 ):
                     self.pending_targets.pop(i)
-                break
 
         if self.interaction_active and self.interaction_end_time is not None:
             if self.get_clock().now().nanoseconds >= self.interaction_end_time:
@@ -365,6 +466,18 @@ class BehaviorManager(Node):
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             if nav_goal_type == 'approach_face':
+                # Nav2 got as close as the costmap allows — drive the rest straight.
+                if (self.active_target is not None and self.latest_robot_pose is not None):
+                    fx = self.active_target['x']
+                    fy = self.active_target['y']
+                    rx = self.latest_robot_pose.position.x
+                    ry = self.latest_robot_pose.position.y
+                    remaining = math.sqrt((fx - rx) ** 2 + (fy - ry) ** 2)
+                    if remaining > self.face_direct_drive_stop_dist:
+                        self.get_logger().info(
+                            f'Face {remaining:.2f} m away — switching to direct drive.')
+                        self._start_face_direct_drive(fx, fy)
+                        return
                 self.publish_state('INTERACT_FACE')
                 self.get_logger().info('Reached face target. Starting interaction.')
                 self.start_interaction()
@@ -379,6 +492,16 @@ class BehaviorManager(Node):
                 self.get_logger().info('Reached barrel target. Starting interaction.')
                 self.start_interaction()
 
+            elif nav_goal_type == 'approach_workstation':
+                self.publish_state('WORKSTATION')
+                self.workstation_start_time = self.get_clock().now().nanoseconds
+                self.get_logger().info('Arrived at workstation — waiting for done signal.')
+
+            elif nav_goal_type == 'approach_final':
+                self.final_nav_failures = 0
+                self.get_logger().info('At final waypoint — looking back for 1 s before blue-line.')
+                self._start_final_look_back()
+
             else:
                 self.get_logger().info('Temporary navigation goal succeeded.')
 
@@ -387,9 +510,15 @@ class BehaviorManager(Node):
             GoalStatus.STATUS_CANCELING,
         ):
             self.get_logger().info(f'Temporary navigation cancelled: {nav_goal_type}')
-            self.refresh_state()
+            if nav_goal_type in ('approach_workstation', 'approach_final'):
+                self._handle_post_patrol_nav_failure(nav_goal_type)
+            else:
+                self.refresh_state()
 
         else:
+            if nav_goal_type in ('approach_workstation', 'approach_final'):
+                self._handle_post_patrol_nav_failure(nav_goal_type)
+                return
             # Face approach: retry at progressively farther distances when the planned
             # path is blocked (e.g. by the inflation zone near a wall).
             if nav_goal_type == 'approach_face' and self.active_target is not None:
@@ -452,9 +581,15 @@ class BehaviorManager(Node):
         return self.current_state == 'PATROL'
 
     def accepts_face_detections(self):
-        # No face detection during barrel approach/interact
         if self.current_state in ('APPROACH_BARREL', 'INTERACT_BARREL'):
             return False
+        if self.current_state in ('APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL'):
+            return False
+        # Allow face detection in the room (line-following phase)
+        if self.current_state in (
+            'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+        ):
+            return True
         return self.current_state in ('PATROL', 'APPROACH_FACE', 'INTERACT_FACE')
 
     def is_active_target_match(self, target_type, x, y, color=None):
@@ -604,8 +739,12 @@ class BehaviorManager(Node):
 
         if not goal_handle.accepted:
             self.get_logger().warn(f'Temporary goal rejected: {self.nav_goal_type}')
+            rejected_type = self.nav_goal_type
             self.nav_goal_type = None
-            self.refresh_state()
+            if self.post_patrol_active:
+                self._handle_post_patrol_nav_failure(rejected_type)
+            else:
+                self.refresh_state()
             return
 
         self.goal_handle = goal_handle
@@ -678,6 +817,12 @@ class BehaviorManager(Node):
                 self.publish_patrol_enabled(False)
                 self.publish_state('APPROACH_BARREL', force_publish)
                 return
+
+        # Post-patrol phases (workstation, final WP, line following) are managed
+        # directly — don't let refresh_state override them back to IDLE.
+        if self.post_patrol_active:
+            self.publish_patrol_enabled(False)
+            return
 
         if self.patrol_requested and not self.patrol_finished:
             self.publish_patrol_enabled(True)
@@ -870,6 +1015,229 @@ class BehaviorManager(Node):
             self.get_logger().info(
                 f'Patrol group ended — {len(deferred)} barrel(s) now ready, pausing patrol.')
 
+    def _start_face_direct_drive(self, face_x, face_y):
+        self.face_direct_drive = True
+        self.face_direct_drive_target = (face_x, face_y)
+        self.face_direct_drive_end = self.get_clock().now().nanoseconds + int(8.0 * 1e9)
+
+    def _update_face_direct_drive(self):
+        if self.latest_robot_pose is None:
+            return
+
+        rx = self.latest_robot_pose.position.x
+        ry = self.latest_robot_pose.position.y
+        fx, fy = self.face_direct_drive_target
+        dist = math.sqrt((fx - rx) ** 2 + (fy - ry) ** 2)
+        now = self.get_clock().now().nanoseconds
+
+        if dist <= self.face_direct_drive_stop_dist or now >= self.face_direct_drive_end:
+            self._stop_direct_drive()
+            self.face_direct_drive = False
+            self.face_direct_drive_target = None
+            self.face_direct_drive_end = None
+            self.get_logger().info(f'Direct drive done (dist={dist:.2f} m). Starting interaction.')
+            self.publish_state('INTERACT_FACE')
+            self.start_interaction()
+            return
+
+        # Compute bearing to face and robot yaw
+        bearing = math.atan2(fy - ry, fx - rx)
+        q = self.latest_robot_pose.orientation
+        robot_yaw = 2.0 * math.atan2(q.z, q.w)
+
+        angle_err = bearing - robot_yaw
+        while angle_err > math.pi:
+            angle_err -= 2 * math.pi
+        while angle_err < -math.pi:
+            angle_err += 2 * math.pi
+
+        angular = max(-0.6, min(0.6, 1.5 * angle_err))
+        linear = 0.0 if abs(angle_err) > 0.3 else 0.20
+
+        twist = Twist()
+        twist.linear.x = float(linear)
+        twist.angular.z = float(angular)
+        self.cmd_vel_pub.publish(twist)
+
+    def _stop_direct_drive(self):
+        self.cmd_vel_pub.publish(Twist())
+
+    def qr_callback(self, msg: String):
+        lower = msg.data.strip().lower()
+        if lower.startswith('defects '):
+            color = lower.split(' ', 1)[1].strip()
+            if color in ('red', 'green') and self.pending_workstation_color is None:
+                self.pending_workstation_color = color
+                self.get_logger().info(
+                    f'QR workstation queued: visit {color} workstation before final waypoint.')
+
+    def workstation_markers_callback(self, msg: MarkerArray):
+        for marker in msg.markers:
+            if marker.type != Marker.CYLINDER:
+                continue
+            x = marker.pose.position.x
+            y = marker.pose.position.y
+            qz = marker.pose.orientation.z
+            qw = marker.pose.orientation.w
+            yaw = 2.0 * math.atan2(qz, qw)
+            if marker.color.r > 0.5 and marker.color.g < 0.3:
+                self.workstation_positions['red'] = (x, y, yaw)
+            elif marker.color.g > 0.5 and marker.color.r < 0.3:
+                self.workstation_positions['green'] = (x, y, yaw)
+
+    def workstation_done_callback(self, msg: Empty):
+        self.workstation_done_flag = True
+        self.get_logger().info('Workstation done signal received.')
+
+    def _start_post_patrol_sequence(self):
+        self.post_patrol_active = True
+        color = self.pending_workstation_color
+        if color is not None and color in self.workstation_positions:
+            x, y, yaw = self.workstation_positions[color]
+            self.get_logger().info(f'Post-patrol: navigating to {color} workstation.')
+            self.publish_yellow_line_enabled(False)
+            self.publish_state('APPROACH_WORKSTATION')
+            self.publish_patrol_enabled(False)
+            self.send_nav_goal(x, y, yaw, 'approach_workstation')
+        else:
+            if color is not None:
+                self.get_logger().warn(
+                    f'Workstation {color} position not yet known — skipping, going to final WP.')
+            self._navigate_to_final_wp()
+
+    def _navigate_to_final_wp(self, reset_failures=True):
+        x = float(self.get_parameter('final_wp_x').value)
+        y = float(self.get_parameter('final_wp_y').value)
+        yaw = float(self.get_parameter('final_wp_yaw').value)
+        if reset_failures:
+            self.final_nav_failures = 0
+        if self.latest_robot_pose is not None:
+            dx = self.latest_robot_pose.position.x - x
+            dy = self.latest_robot_pose.position.y - y
+            if math.hypot(dx, dy) > 0.05:
+                yaw = math.atan2(dy, dx)
+        self.final_look_back_yaw = yaw
+        self.get_logger().info(f'Navigating to final waypoint ({x:.2f}, {y:.2f}).')
+        self.publish_yellow_line_enabled(False)
+        self.publish_state('APPROACH_FINAL')
+        self.publish_patrol_enabled(False)
+        self.send_nav_goal(x, y, yaw, 'approach_final')
+
+    def _start_final_look_back(self):
+        self.final_look_back_active = True
+        self.final_look_back_hold_start = None
+        self.final_look_back_align_deadline = (
+            self.get_clock().now().nanoseconds + int(3.0 * 1e9)
+        )
+
+    @staticmethod
+    def _angle_error(target, current):
+        err = target - current
+        while err > math.pi:
+            err -= 2.0 * math.pi
+        while err < -math.pi:
+            err += 2.0 * math.pi
+        return err
+
+    def _update_final_look_back(self):
+        now_ns = self.get_clock().now().nanoseconds
+        target_yaw = self.final_look_back_yaw
+
+        if target_yaw is not None and self.latest_robot_pose is not None:
+            q = self.latest_robot_pose.orientation
+            current_yaw = 2.0 * math.atan2(q.z, q.w)
+            err = self._angle_error(target_yaw, current_yaw)
+            if abs(err) > 0.08 and now_ns < self.final_look_back_align_deadline:
+                twist = Twist()
+                twist.angular.z = max(-0.5, min(0.5, 1.2 * err))
+                self.cmd_vel_pub.publish(twist)
+                return
+
+        if self.final_look_back_hold_start is None:
+            self._stop_direct_drive()
+            self.final_look_back_hold_start = now_ns
+            return
+
+        if (now_ns - self.final_look_back_hold_start) / 1e9 < self.final_look_back_hold_duration:
+            self._stop_direct_drive()
+            return
+
+        self._stop_direct_drive()
+        self.final_look_back_active = False
+        self.final_look_back_hold_start = None
+        self.final_look_back_align_deadline = None
+        self._start_blue_line_runtime()
+
+    def _start_blue_line_runtime(self):
+        if self.blue_line_runtime_started:
+            return
+        self.blue_line_runtime_started = True
+        self.get_logger().info(
+            'Final look-back done — enabling blue-line runtime and shutting down nonessential nodes.')
+        self.publish_state('LINE_FOLLOWING')
+        self._shutdown_nonessential_runtime_nodes()
+        m = Bool()
+        m.data = True
+        self.blue_line_pub.publish(m)
+
+    def _shutdown_nonessential_runtime_nodes(self):
+        keep_patterns = (
+            'detect_people.py',
+            'face_recognizer',
+            'blue_line_explorer',
+            'behavior_manager',
+        )
+        kill_patterns = (
+            'detect_rings_v2',
+            'ring_localizator',
+            'cylinder_segmentation',
+            'cylinder_localizator',
+            'cylinder_debug_view',
+            'barrel_inspector',
+            'yellow_line_avoider',
+            'line_localizator',
+            'face_localizator',
+            'color_mask_viewer',
+            'workstation_recorder',
+            'waypoint_navigator',
+            'robot_state_overlay',
+            'report_manager',
+            'station_inspector',
+            'tile_detect',
+            'tile_classifier',
+            'qr_reader',
+            'orchestrator',
+        )
+        for pattern in kill_patterns:
+            if pattern in keep_patterns:
+                continue
+            try:
+                result = subprocess.run(
+                    ['pkill', '-f', pattern],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    self.get_logger().info(f'Shut down nonessential node: {pattern}')
+            except Exception as exc:
+                self.get_logger().warn(f'Could not shut down {pattern}: {exc}')
+
+    def _handle_post_patrol_nav_failure(self, goal_type):
+        if goal_type == 'approach_workstation':
+            self.get_logger().warn('Workstation nav failed — skipping to final waypoint.')
+            self.pending_workstation_color = None
+            self._navigate_to_final_wp()
+        elif goal_type == 'approach_final':
+            self.final_nav_failures += 1
+            if self.final_nav_failures <= 2:
+                self.get_logger().warn(
+                    f'Final WP nav failed — retrying ({self.final_nav_failures}/2).')
+                self._navigate_to_final_wp(reset_failures=False)
+            else:
+                self.get_logger().error(
+                    'Final WP nav failed repeatedly; blue-line runtime will not start until the final waypoint is reached.')
+
     def patrol_command_callback(self, msg: Bool):
         self.patrol_requested = msg.data
 
@@ -887,7 +1255,11 @@ class BehaviorManager(Node):
 
         self.patrol_finished = True
         self.patrol_requested = False
-        self.refresh_state()
+        self.need_post_patrol = True
+        # Unlock all deferred targets — patrol is over, no more rotation groups.
+        for t in self.pending_targets:
+            t.pop('wait_for_group_end', None)
+        # main_loop will call _start_post_patrol_sequence() once the robot is free.
 
 
 def main(args=None):

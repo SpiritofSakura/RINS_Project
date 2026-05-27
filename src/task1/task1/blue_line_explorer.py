@@ -36,7 +36,7 @@ class BlueLineExplorer(Node):
 
         # ── enable / topic ───────────────────────────────────────────────────
         self.declare_parameter("enabled_on_start", False)
-        self.declare_parameter("start_on_patrol_finished", True)
+        self.declare_parameter("start_on_patrol_finished", False)
         self.declare_parameter("camera_topic", "/top_camera/rgb/preview/image_raw")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_unstamped")
         self.declare_parameter("debug_view", False)
@@ -107,6 +107,8 @@ class BlueLineExplorer(Node):
             Bool, "/blue_line_enabled", self._enable_callback, 10)
         self.patrol_sub = self.create_subscription(
             Bool, "/patrol_finished", self._patrol_callback, 10)
+        self.robot_state_sub = self.create_subscription(
+            String, "/robot_state", self._robot_state_callback, 10)
 
         self.cmd_pub = self.create_publisher(Twist, cmd_vel_topic, 10)
         self.state_pub = self.create_publisher(String, "/robot_state", 10)
@@ -158,6 +160,11 @@ class BlueLineExplorer(Node):
     def _patrol_callback(self, msg):
         if msg.data and self.get_parameter("start_on_patrol_finished").value:
             self._start()
+
+    def _robot_state_callback(self, msg: String):
+        if msg.data == 'LINE_FOLLOWING' and not self.enabled:
+            self.get_logger().info('LINE_FOLLOWING — waiting for explicit blue-line enable.')
+            self.debug_view = True
 
     def _hazard_callback(self, msg):
         if not self.enabled or self.mode == "UTURN":
@@ -377,9 +384,9 @@ class BlueLineExplorer(Node):
                 self.mode = "SEARCH"
                 self._stop()
             else:
-                # Always rotate left so we re-approach from the left side.
+                # Rotate clockwise (negative = CW) to re-approach from the right side.
                 self._pub_twist(
-                    0.0, float(self.get_parameter("uturn_angular_speed").value))
+                    0.0, -float(self.get_parameter("uturn_angular_speed").value))
             return
 
         # ── Search ───────────────────────────────────────────────────────────
@@ -390,9 +397,9 @@ class BlueLineExplorer(Node):
                 self.mode = "FOLLOW"
                 self.line_lost_since = None
             else:
-                # Rotate left slowly until the line is found.
+                # Rotate clockwise slowly until the line is found.
                 spd = float(self.get_parameter("uturn_angular_speed").value)
-                self._pub_twist(0.0, spd * 0.5)
+                self._pub_twist(0.0, -spd * 0.5)
             return
 
         # ── Follow ───────────────────────────────────────────────────────────

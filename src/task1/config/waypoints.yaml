@@ -59,25 +59,32 @@ waypoints:
   yaw: 0.0       # East
   pause: 1.0
 
-# ── Waypoint 4 — 360° scan ────────────────────────────────────────────────────
-- x: -2.375
-  y: -0.302
-  yaw: 0.0       # East
-  pause: 1.0
-- x: -2.375
-  y: -0.302
+
+#Waypoint 4
+- x: -4.339
+  y: -0.244
   yaw: 1.5708    # North
   pause: 1.0
-- x: -2.375
-  y: -0.302
+
+# ── Waypoint 5— 360° scan ────────────────────────────────────────────────────
+- x: -2.211
+  y: 0.017
+  yaw: 0.0       # East
+  pause: 1.0
+- x: -2.211
+  y: 0.017
+  yaw: 1.5708    # North
+  pause: 1.0
+- x: -2.211
+  y: 0.017
   yaw: 3.1416    # West
   pause: 1.0
-- x: -2.375
-  y: -0.302
+- x: -2.211
+  y: 0.017
   yaw: -1.5708   # South
   pause: 1.0
 
-# ── Waypoint 5 — 360° scan ────────────────────────────────────────────────────
+# ── Waypoint 6— 360° scan ────────────────────────────────────────────────────
 - x: -0.120
   y: -0.801
   yaw: 0.0       # East
@@ -95,7 +102,5 @@ waypoints:
   yaw: -1.5708   # South
   pause: 1.0
 
-# ── Waypoint 6 — End pose ─────────────────────────────────────────────────────
-- x: 2.755
-  y: 0.288
-  yaw: 0.0
+# ── Final waypoint is handled by behavior_manager after workstation visit ─────
+# (x=2.755, y=0.288, yaw=0.0 — declared as final_wp_x/y/yaw parameters)

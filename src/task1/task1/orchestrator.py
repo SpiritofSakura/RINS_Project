@@ -6,7 +6,7 @@ import signal
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from std_msgs.msg import String
+from std_msgs.msg import Bool, Empty, String
 from geometry_msgs.msg import PoseStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from nav2_msgs.action import NavigateToPose
@@ -23,6 +23,9 @@ class Orchestrator(Node):
         self._pending_defects = set()
         self._inspector_proc = None
         self._saved_pose = None
+        self._patrol_finished = False
+        self._robot_state = ""
+        self._post_patrol_inspection = False
         self._nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self._return_goal_done = False
         self._return_goal_sent = False
@@ -42,8 +45,20 @@ class Orchestrator(Node):
             String, "/qr", self._qr_cb, 10
         )
 
+        self._patrol_finished_sub = self.create_subscription(
+            Bool, "/patrol_finished", self._patrol_finished_cb, 10
+        )
+
+        self._state_sub = self.create_subscription(
+            String, "/robot_state", self._state_cb, 10
+        )
+
         self._out_pub = self.create_publisher(
             PoseStamped, "/orchestrator_out", 10
+        )
+
+        self._workstation_done_pub = self.create_publisher(
+            Empty, "/workstation_done", 10
         )
 
         self.create_timer(0.1, self._update)
@@ -139,14 +154,13 @@ class Orchestrator(Node):
 
     def _start_defect_flow(self, color):
         self.get_logger().info(f"Starting defect flow for {color}")
-        pos, yaw = self._get_robot_pose()
-        if pos is None:
-            self.get_logger().error("Cannot get current robot pose, aborting defect flow")
-            return
-        self._saved_pose = (pos[0], pos[1], yaw)
-        self.get_logger().info(f"Saved current pose: ({pos[0]:.2f}, {pos[1]:.2f}), yaw={yaw:.2f}")
+        self._saved_pose = None
+        self._post_patrol_inspection = True
         self._publish_waypoint(color)
-        self._launch_inspector(color)
+        if not self._launch_inspector(color):
+            self._post_patrol_inspection = False
+            return False
+        return True
 
     def _qr_cb(self, msg):
         lower = msg.data.strip().lower()
@@ -154,18 +168,39 @@ class Orchestrator(Node):
             color = lower.split(" ", 1)[1]
             if color in ("red", "green"):
                 self._pending_defects.add(color)
-                self.get_logger().info(f"QR requested defects for {color}")
+                self.get_logger().info(
+                    f"QR requested defects for {color}; queued until after waypoint #5"
+                )
+                self._try_defect_flow(color)
+
+    def _patrol_finished_cb(self, msg):
+        self._patrol_finished = bool(msg.data)
+        if self._patrol_finished and self._pending_defects:
+            self.get_logger().info(
+                "Patrol finished; waiting for WORKSTATION state before inspection"
+            )
+            for color in list(self._pending_defects):
+                self._try_defect_flow(color)
+
+    def _state_cb(self, msg):
+        self._robot_state = msg.data.strip()
+        if self._robot_state == "WORKSTATION":
+            for color in list(self._pending_defects):
                 self._try_defect_flow(color)
 
     def _try_defect_flow(self, color):
+        if not self._patrol_finished:
+            return
+        if self._robot_state != "WORKSTATION":
+            return
         if color not in self._waypoints:
             self.get_logger().info(f"Waiting for {color} waypoint before starting defect flow")
             return
         if self._inspector_proc is not None:
             self.get_logger().info("Inspector already running, deferring")
             return
-        self._pending_defects.discard(color)
-        self._start_defect_flow(color)
+        if self._start_defect_flow(color):
+            self._pending_defects.discard(color)
 
     def _ws_cb(self, msg):
         for marker in msg.markers:
@@ -228,6 +263,11 @@ class Orchestrator(Node):
             if ret is not None:
                 self.get_logger().info(f"Inspector finished (return code {ret})")
                 self._inspector_proc = None
+                if self._post_patrol_inspection:
+                    self._post_patrol_inspection = False
+                    self._workstation_done_pub.publish(Empty())
+                    self.get_logger().info("Published workstation done")
+                    return
                 if self._saved_pose is not None:
                     x, y, yaw = self._saved_pose
                     self._saved_pose = None

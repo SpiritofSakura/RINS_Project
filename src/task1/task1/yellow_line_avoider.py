@@ -30,7 +30,7 @@ from geometry_msgs.msg import Twist, TwistStamped
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -81,6 +81,13 @@ class YellowLineAvoider(Node):
         self.state    = "CLEAR"
         self.back_end = 0.0
         self._spoke   = False
+        self.robot_state = 'IDLE'
+        self.runtime_enabled = True
+
+        self.robot_state_sub = self.create_subscription(
+            String, '/robot_state', self._state_cb, 10)
+        self.enable_sub = self.create_subscription(
+            Bool, '/yellow_line_enabled', self._enable_cb, 10)
 
         # 50 Hz — faster than Nav2 (~10-20 Hz) and teleop (~10 Hz) so
         # backing commands win the last-write-wins race on both topics.
@@ -89,9 +96,26 @@ class YellowLineAvoider(Node):
             f"YellowLineAvoider ready on {camera_topic}. "
             "Overrides /cmd_vel_unstamped + /cmd_vel at 50 Hz during backing.")
 
-    # ── image callback ─────────────────────────────────────────────────────────
+    # ── callbacks ──────────────────────────────────────────────────────────────
+
+    def _state_cb(self, msg: String):
+        self.robot_state = msg.data
+
+    def _enable_cb(self, msg: Bool):
+        self.runtime_enabled = bool(msg.data)
+        if not self.runtime_enabled:
+            self._pub_vel(0.0, 0.0)
+            self.state = "CLEAR"
+            self._spoke = False
+            if hasattr(self, "_latest"):
+                del self._latest
+            self.get_logger().info("YellowLineAvoider disabled.")
+        else:
+            self.get_logger().info("YellowLineAvoider enabled.")
 
     def _image_cb(self, msg):
+        if not self._should_run():
+            return
         try:
             self._latest = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception:
@@ -100,7 +124,7 @@ class YellowLineAvoider(Node):
     # ── main loop ──────────────────────────────────────────────────────────────
 
     def _update(self):
-        if not self.get_parameter("enabled").value:
+        if not self._should_run():
             return
         if not hasattr(self, "_latest"):
             return
@@ -191,6 +215,14 @@ class YellowLineAvoider(Node):
 
     def _now(self):
         return self.get_clock().now().nanoseconds / 1e9
+
+    def _should_run(self):
+        if not self.get_parameter("enabled").value or not self.runtime_enabled:
+            return False
+        return self.robot_state not in (
+            'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL',
+            'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+        )
 
     def _pub_vel(self, linear: float, angular: float):
         """Publish to both velocity topics simultaneously."""

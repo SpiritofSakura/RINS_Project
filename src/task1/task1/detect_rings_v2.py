@@ -126,12 +126,16 @@ class RingDetectorV2(Node):
         self.get_logger().info("RingDetector V2 ready (Hough circle mode).")
 
     def depth_callback(self, data):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         try:
             self.depth_raw = self.bridge.imgmsg_to_cv2(data, "16UC1")
         except CvBridgeError:
             return
 
     def pointcloud_callback(self, data):
+        if self.robot_state in self._INACTIVE_STATES:
+            return
         """Store point cloud XYZ and RGB for accurate 3D position and color lookup."""
         try:
             # Log available fields once
@@ -174,6 +178,10 @@ class RingDetectorV2(Node):
         self.image_header = data.header
 
         if self.depth_raw is None or self.rgb_image is None:
+            return
+
+        # Skip detection during workstation/line-following — free CPU for other tasks.
+        if self.robot_state in self._INACTIVE_STATES:
             return
 
         # ── Crop to top half only ──────────────────────────────────────────
@@ -236,9 +244,17 @@ class RingDetectorV2(Node):
         cv2.imshow("Hough Circles", debug_img)
         cv2.waitKey(1)
 
+    _INACTIVE_STATES = frozenset((
+        'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL',
+        'LINE_FOLLOWING', 'BLUE_LINE_SEARCH', 'BLUE_LINE_FOLLOW', 'BLUE_LINE_DEAD_END',
+    ))
+
     def robot_state_callback(self, data):
         """Update robot state for conditional marker publishing."""
+        prev = self.robot_state
         self.robot_state = data.data
+        if self.robot_state in self._INACTIVE_STATES and prev not in self._INACTIVE_STATES:
+            cv2.destroyAllWindows()
 
     def _evaluate_circle(self, cx, cy, radius, depth_m, rgb_img, disparity_mask):
         """

@@ -8,6 +8,7 @@ from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2 as pc2
 
 from visualization_msgs.msg import Marker
+from std_msgs.msg import String
 
 from cv_bridge import CvBridge, CvBridgeError
 import cv2
@@ -36,9 +37,12 @@ class detect_faces(Node):
 
 		self.bridge = CvBridge()
 		self.scan = None
+		self.robot_state = 'IDLE'
+		self._debug_window_open = True
 
 		self.rgb_image_sub = self.create_subscription(Image, "/oakd/rgb/preview/image_raw", self.rgb_callback, qos_profile_sensor_data)
 		self.pointcloud_sub = self.create_subscription(PointCloud2, "/oakd/rgb/preview/depth/points", self.pointcloud_callback, qos_profile_sensor_data)
+		self.state_sub = self.create_subscription(String, "/robot_state", self._state_callback, 10)
 
 		self.marker_pub = self.create_publisher(Marker, marker_topic, QoSReliabilityPolicy.BEST_EFFORT)
 
@@ -48,14 +52,30 @@ class detect_faces(Node):
 
 		self.get_logger().info(f"Node has been initialized! Will publish face markers to {marker_topic}.")
 
+	_INACTIVE_STATES = frozenset((
+		'APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL',
+	))
+
+	def _state_callback(self, msg):
+		prev = self.robot_state
+		self.robot_state = msg.data
+		if self.robot_state in self._INACTIVE_STATES and prev not in self._INACTIVE_STATES:
+			self.faces = []
+			cv2.destroyAllWindows()
+			self._debug_window_open = False
+		elif self.robot_state not in self._INACTIVE_STATES:
+			self._debug_window_open = True
+
 	def rgb_callback(self, data):
 
 		self.faces = []
+		if self.robot_state in self._INACTIVE_STATES:
+			return
 
 		try:
 			cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
 
-			self.get_logger().info(f"Running inference on image...")
+			self.get_logger().debug("Running person inference on image.")
 
 			# run inference
 			res = self.model.predict(cv_image, imgsz=(256, 320), show=False, verbose=False, classes=[0], device=self.device)
@@ -66,7 +86,7 @@ class detect_faces(Node):
 				if bbox.nelement() == 0: # skip if empty
 					continue
 
-				self.get_logger().info(f"Person has been detected!")
+				self.get_logger().info("Person has been detected!", throttle_duration_sec=1.0)
 
 				bbox = bbox[0]
 
@@ -81,16 +101,19 @@ class detect_faces(Node):
 
 				self.faces.append((cx,cy))
 
-			cv2.imshow("image", cv_image)
-			key = cv2.waitKey(1)
-			if key==27:
-				print("exiting")
-				exit()
+			if self._debug_window_open:
+				cv2.imshow("image", cv_image)
+				key = cv2.waitKey(1)
+				if key==27:
+					print("exiting")
+					exit()
 			
 		except CvBridgeError as e:
 			print(e)
 
 	def pointcloud_callback(self, data):
+		if self.robot_state in self._INACTIVE_STATES:
+			return
 
 		# get point cloud attributes
 		height = data.height
