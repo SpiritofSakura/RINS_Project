@@ -84,6 +84,7 @@ class StationInspector(Node):
         self._stop_reason = None
         self.phase_pub = self.create_publisher(Int32, "/inspector_phase", 10)
         self.station_pub = self.create_publisher(String, "/inspector_station", 10)
+        self.finish_pub = self.create_publisher(String, "/inspector_finish", 10)
         self.tile_status_sub = self.create_subscription(
             String, "/tile_status", self._tile_status_callback, 10
         )
@@ -100,6 +101,8 @@ class StationInspector(Node):
         self._phase5_sub = 0
         self._end_belt_start = None
         self._phase5_start = None
+        self._finish_sent = False
+        self._finish_shutdown_at = None
 
         self.create_timer(0.1, self._update)
         self.get_logger().info(
@@ -354,6 +357,13 @@ class StationInspector(Node):
         return min_dist if min_dist != float("inf") else None
 
     def _update(self):
+        if self._finish_sent:
+            self.finish_pub.publish(String(data="finished"))
+            if (self._finish_shutdown_at is not None
+                    and self.get_clock().now().nanoseconds >= self._finish_shutdown_at):
+                rclpy.shutdown()
+            return
+
         if self.state == "INSPECTOR_INACTIVE":
             if self.use_yaml and self._load_yaml():
                 self._set_state("NAV_TO_WS")
@@ -680,14 +690,22 @@ class StationInspector(Node):
                     if elapsed >= 4:
                         self._stop_robot()
                         self._phase5_sub = 2
-                        self.get_logger().info("Escape complete, shutting down")
-                        rclpy.shutdown()
+                        self._publish_finish_and_shutdown()
                         return
                     msg = Twist()
                     msg.linear.x = 0.3
                     msg.angular.z = 0.0
                     self.cmd_pub.publish(msg)
 
+
+    def _publish_finish_and_shutdown(self):
+        if self._finish_sent:
+            return
+        self._stop_robot()
+        self._finish_sent = True
+        self._finish_shutdown_at = self.get_clock().now().nanoseconds + int(0.5 * 1e9)
+        self.finish_pub.publish(String(data="finished"))
+        self.get_logger().info("Escape complete, published inspector_finish=finished; shutting down")
 
     def _kill_proc(self, proc, name):
         if proc is None:

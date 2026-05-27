@@ -94,6 +94,13 @@ class ReportManager(Node):
         self.barrel_data = []
         self.defect_stations = set()
         self.requested_by = "Unknown"
+        self._round_requester = "Unknown"
+        self._round_tasks = set()
+        self._task_requesters = {
+            "rings": "Unknown",
+            "barrels": "Unknown",
+        }
+        self._defect_requesters = {}
         self._noqr = self.get_parameter("noqr").value
         if self._noqr:
             self.get_logger().info("noqr mode: showing all section headers")
@@ -149,30 +156,61 @@ class ReportManager(Node):
 
     def _qr_callback(self, msg: String):
         lower = msg.data.strip().lower()
-        if lower == "rings":
+        if lower == "approaching face":
+            self._start_requester_round()
+        elif lower == "rings":
             self.rings_requested = True
+            self._mark_task_requested("rings")
             self.get_logger().info("QR requested: rings")
         elif lower == "barrels":
             self.barrels_requested = True
+            self._mark_task_requested("barrels")
             self.get_logger().info("QR requested: barrels")
         elif lower.startswith("defects "):
             color = lower.split(" ", 1)[1]
             self.defect_stations.add(color)
+            self._mark_task_requested(("defects", color))
             self.get_logger().info(f"QR requested: defects for {color}")
         elif lower.startswith("person "):
             name = msg.data.strip()[7:]
-            self.requested_by = name
-            self.get_logger().info(f"Task requested by: {name}")
+            self._set_round_requester(name)
 
     def _person_callback(self, msg: String):
         try:
             data = json.loads(msg.data)
             name = data.get("name", "")
             if name:
-                self.requested_by = name
                 self.get_logger().info(f"Recognized person: {name}")
         except Exception:
             pass
+
+    def _start_requester_round(self):
+        self._round_requester = "Unknown"
+        self._round_tasks = set()
+        self.get_logger().info("Requester round started")
+
+    def _set_round_requester(self, name):
+        self._round_requester = name or "Unknown"
+        self.requested_by = self._round_requester
+        for task_key in self._round_tasks:
+            self._assign_requester(task_key, self._round_requester)
+        self.get_logger().info(f"Requester for current round: {self._round_requester}")
+
+    def _mark_task_requested(self, task_key):
+        self._round_tasks.add(task_key)
+        self._assign_requester(task_key, self._round_requester)
+
+    def _assign_requester(self, task_key, requester):
+        requester = requester or "Unknown"
+        if isinstance(task_key, tuple) and task_key[0] == "defects":
+            self._defect_requesters[task_key[1]] = requester
+        else:
+            self._task_requesters[task_key] = requester
+
+    def _requester_for(self, task_key):
+        if isinstance(task_key, tuple) and task_key[0] == "defects":
+            return self._defect_requesters.get(task_key[1], "Unknown")
+        return self._task_requesters.get(task_key, "Unknown")
 
     def _marker_to_color(self, marker: Marker):
         r, g, b = round(marker.color.r, 2), round(marker.color.g, 2), round(marker.color.b, 2)
@@ -273,6 +311,14 @@ class ReportManager(Node):
         self._heatmap_cache = {}
         self._pending_defect = None
         self._seen_ring_ids = set()
+        self.requested_by = "Unknown"
+        self._round_requester = "Unknown"
+        self._round_tasks = set()
+        self._task_requesters = {
+            "rings": "Unknown",
+            "barrels": "Unknown",
+        }
+        self._defect_requesters = {}
         self.get_logger().info("Reports cleared")
 
     def _gen_barrel_image_name(self):
@@ -308,6 +354,7 @@ class ReportManager(Node):
         if station in ("green", "red"):
             self._current_station = station
             self.defect_stations.add(station)
+            self._defect_requesters.setdefault(station, self._round_requester)
             if station not in self.tiles_per_station:
                 self.tiles_per_station[station] = []
             self.get_logger().info(f"Station set: {station}")
@@ -479,7 +526,7 @@ class ReportManager(Node):
         if self.rings_requested or sum(self.ring_counts.values()) > 0:
             total_rings = sum(self.ring_counts.values())
             pdf.section_title("Task: Ring Counting")
-            pdf.subsection(f"Requested by: {self.requested_by}")
+            pdf.subsection(f"Requested by: {self._requester_for('rings')}")
             pdf.ln(2)
             pdf.body("Results:")
             pdf.body(f"- Total number of rings detected:  {total_rings}")
@@ -499,7 +546,7 @@ class ReportManager(Node):
         if self.barrels_requested or len(self.barrel_data) > 0:
             pdf.add_page()
             pdf.section_title("Task: Barrel Inspection")
-            pdf.subsection(f"Requested by: {self.requested_by}")
+            pdf.subsection(f"Requested by: {self._requester_for('barrels')}")
             pdf.ln(2)
             pdf.body("Results:")
             pdf.body(f"- Total number of barrels inspected:  {len(self.barrel_data)}")
@@ -580,7 +627,7 @@ class ReportManager(Node):
                 pdf.section_title("Task: Anomaly Detection")
             first = False
 
-            pdf.subsection(f"Requested by: {self.requested_by}")
+            pdf.subsection(f"Requested by: {self._requester_for(('defects', station))}")
             pdf.subsection(f"Station: {station.capitalize()}")
             pdf.ln(2)
             pdf.subsection("Results:")
@@ -662,7 +709,7 @@ class ReportManager(Node):
                 if self.ring_counts.get(c, 0) > 0
             ) or "  - (none)"
             text += f"""## Task: Ring Counting
-**Requested by:** {self.requested_by}
+**Requested by:** {self._requester_for('rings')}
 
 ### Results:
 - **Total number of rings detected:** {total_rings}
@@ -687,7 +734,7 @@ Task not requested
                 for b in self.barrel_data
             ) or "| - | - | - | - |"
             text += f"""## Task: Barrel Inspection
-**Requested by:** {self.requested_by}
+**Requested by:** {self._requester_for('barrels')}
 
 ### Results:
 - **Total number of barrels inspected:** {len(self.barrel_data)}
@@ -726,7 +773,7 @@ Task not requested
 
                 text += f"""
 
-**Requested by:** {self.requested_by}
+**Requested by:** {self._requester_for(('defects', station))}
 **Station:** {station.capitalize()}
 
 ### Results:

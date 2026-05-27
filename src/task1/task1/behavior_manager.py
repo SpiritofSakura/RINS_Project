@@ -90,6 +90,7 @@ class BehaviorManager(Node):
         self.pending_workstation_color = None   # set by QR code
         self.workstation_positions = {}          # color → (x, y, yaw)
         self.workstation_done_flag = False
+        self.inspector_finished_flag = False
         self.workstation_start_time = None
         self.workstation_timeout = 60.0          # seconds at workstation before giving up
         self.post_patrol_active = False
@@ -208,6 +209,8 @@ class BehaviorManager(Node):
             MarkerArray, '/workstation_markers', self.workstation_markers_callback, 10)
         self.workstation_done_sub = self.create_subscription(
             Empty, '/workstation_done', self.workstation_done_callback, 10)
+        self.inspector_finish_sub = self.create_subscription(
+            String, '/inspector_finish', self.inspector_finish_callback, 10)
 
         self.timer = self.create_timer(0.2, self.main_loop)
 
@@ -346,9 +349,10 @@ class BehaviorManager(Node):
             self._start_post_patrol_sequence()
             return
 
-        # Workstation dwell: hold until /workstation_done fires or timeout.
+        # Workstation dwell: hold until the inspector explicitly reports finished.
         if self.current_state == 'WORKSTATION':
-            if self.workstation_done_flag:
+            if self.inspector_finished_flag:
+                self.inspector_finished_flag = False
                 self.workstation_done_flag = False
                 self.workstation_start_time = None
                 self.pending_workstation_color = None
@@ -357,10 +361,9 @@ class BehaviorManager(Node):
             if (self.workstation_start_time is not None
                     and (self.get_clock().now().nanoseconds - self.workstation_start_time) / 1e9
                     >= self.workstation_timeout):
-                self.get_logger().warn('Workstation timeout — proceeding to final waypoint.')
-                self.workstation_start_time = None
-                self.pending_workstation_color = None
-                self._navigate_to_final_wp()
+                self.get_logger().warn(
+                    'Still waiting for /inspector_finish before sending final waypoint.')
+                self.workstation_start_time = self.get_clock().now().nanoseconds
             return
 
         # Direct-drive toward face: bypasses Nav2 costmap for the final ~0.5 m.
@@ -396,26 +399,17 @@ class BehaviorManager(Node):
                 t = self.pending_targets[i]
                 if self.is_already_handled(t['type'], t['x'], t['y'], t.get('color')):
                     self.pending_targets.pop(i)
-<<<<<<< HEAD
                     self.get_logger().info(
                         f"Queued {t['type']} detection already handled, skipping.")
             # Collect non-deferred targets and sort faces before barrels.
             ready = [
                 (i, t) for i, t in enumerate(self.pending_targets)
-                if not t.get('wait_for_group_end', False)
+                if (not t.get('wait_for_group_end', False)
+                    and not (self.manual_control_active and t['type'] == 'face'))
             ]
             ready.sort(key=lambda it: _TARGET_PRIORITY.get(it[1]['type'], 2))
             if ready:
                 i, target = ready[0]
-=======
-                    self.get_logger().info(f"Queued {target['type']} detection already handled, skipping.")
-                    break
-                if target.get('wait_for_group_end', False):
-                    continue  # deferred — skip until group_end fires
-                # Wait for blue-line explorer to fully stop before activating face
-                if self.manual_control_active and target['type'] == 'face':
-                    continue
->>>>>>> origin/blue-line-face
                 self.get_logger().info(
                     f'Processing queued {target["type"]} detection '
                     f'(x={target["x"]:.2f}, y={target["y"]:.2f})')
@@ -593,7 +587,6 @@ class BehaviorManager(Node):
         return self.current_state == 'PATROL'
 
     def accepts_face_detections(self):
-<<<<<<< HEAD
         if self.current_state in ('APPROACH_BARREL', 'INTERACT_BARREL'):
             return False
         if self.current_state in ('APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL'):
@@ -604,11 +597,6 @@ class BehaviorManager(Node):
         ):
             return True
         return self.current_state in ('PATROL', 'APPROACH_FACE', 'INTERACT_FACE')
-=======
-        if self.current_state in ('APPROACH_BARREL', 'INTERACT_BARREL', 'PATROL'):
-            return False
-        return self.current_state in ('APPROACH_FACE', 'INTERACT_FACE', 'MANUAL_CONTROL')
->>>>>>> origin/blue-line-face
 
     def is_active_target_match(self, target_type, x, y, color=None):
         if self.active_target is None:
@@ -1115,7 +1103,13 @@ class BehaviorManager(Node):
 
     def workstation_done_callback(self, msg: Empty):
         self.workstation_done_flag = True
-        self.get_logger().info('Workstation done signal received.')
+        self.get_logger().info(
+            'Workstation done signal received; waiting for inspector_finish before final waypoint.')
+
+    def inspector_finish_callback(self, msg: String):
+        if msg.data.strip().lower() == 'finished':
+            self.inspector_finished_flag = True
+            self.get_logger().info('Inspector finished signal received.')
 
     def _start_post_patrol_sequence(self):
         self.post_patrol_active = True
@@ -1212,8 +1206,11 @@ class BehaviorManager(Node):
         keep_patterns = (
             'detect_people.py',
             'face_recognizer',
+            'face_localizator',
             'blue_line_explorer',
             'behavior_manager',
+            'report_manager',
+            'qr_reader',
         )
         kill_patterns = (
             'detect_rings_v2',
@@ -1224,16 +1221,13 @@ class BehaviorManager(Node):
             'barrel_inspector',
             'yellow_line_avoider',
             'line_localizator',
-            'face_localizator',
             'color_mask_viewer',
             'workstation_recorder',
             'waypoint_navigator',
             'robot_state_overlay',
-            'report_manager',
             'station_inspector',
             'tile_detect',
             'tile_classifier',
-            'qr_reader',
             'orchestrator',
         )
         for pattern in kill_patterns:
