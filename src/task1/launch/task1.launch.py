@@ -130,6 +130,13 @@ def generate_launch_description():
         output='screen',
     )
 
+    pointcloud_viewer_node = Node(
+        package='task1',
+        executable='pointcloud_viewer',
+        name='pointcloud_viewer',
+        output='screen',
+    )
+
     orchestrator_node = Node(
         package='task1',
         executable='orchestrator',
@@ -187,6 +194,7 @@ def generate_launch_description():
         delayed_cylinder_localizator,
         delayed_cylinder_debug_view,
         barrel_inspector_node,
+        pointcloud_viewer_node,
         orchestrator_node,
         qr_reader_node,
         report_manager_node,
