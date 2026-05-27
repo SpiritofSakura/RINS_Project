@@ -64,6 +64,7 @@ class BehaviorManager(Node):
         self.interaction_duration = 2.5
         self.barrel_interaction_duration = 5.0
 
+
         # Approach timeout: auto-enter interact if not reached in 15 seconds
         self.approach_start_time = None
         self.approach_timeout = 15.0  # seconds
@@ -126,6 +127,7 @@ class BehaviorManager(Node):
 
         self.state_publisher = self.create_publisher(String, '/robot_state', qos_latched)
         self.patrol_enabled_publisher = self.create_publisher(Bool, '/patrol_enabled', qos_latched)
+        self.blue_line_enabled_pub = self.create_publisher(Bool, '/blue_line_enabled', 10)
 
         self.manual_control_subscriber = self.create_subscription(
             Bool,
@@ -394,6 +396,7 @@ class BehaviorManager(Node):
                 t = self.pending_targets[i]
                 if self.is_already_handled(t['type'], t['x'], t['y'], t.get('color')):
                     self.pending_targets.pop(i)
+<<<<<<< HEAD
                     self.get_logger().info(
                         f"Queued {t['type']} detection already handled, skipping.")
             # Collect non-deferred targets and sort faces before barrels.
@@ -404,6 +407,15 @@ class BehaviorManager(Node):
             ready.sort(key=lambda it: _TARGET_PRIORITY.get(it[1]['type'], 2))
             if ready:
                 i, target = ready[0]
+=======
+                    self.get_logger().info(f"Queued {target['type']} detection already handled, skipping.")
+                    break
+                if target.get('wait_for_group_end', False):
+                    continue  # deferred — skip until group_end fires
+                # Wait for blue-line explorer to fully stop before activating face
+                if self.manual_control_active and target['type'] == 'face':
+                    continue
+>>>>>>> origin/blue-line-face
                 self.get_logger().info(
                     f'Processing queued {target["type"]} detection '
                     f'(x={target["x"]:.2f}, y={target["y"]:.2f})')
@@ -581,6 +593,7 @@ class BehaviorManager(Node):
         return self.current_state == 'PATROL'
 
     def accepts_face_detections(self):
+<<<<<<< HEAD
         if self.current_state in ('APPROACH_BARREL', 'INTERACT_BARREL'):
             return False
         if self.current_state in ('APPROACH_WORKSTATION', 'WORKSTATION', 'APPROACH_FINAL'):
@@ -591,6 +604,11 @@ class BehaviorManager(Node):
         ):
             return True
         return self.current_state in ('PATROL', 'APPROACH_FACE', 'INTERACT_FACE')
+=======
+        if self.current_state in ('APPROACH_BARREL', 'INTERACT_BARREL', 'PATROL'):
+            return False
+        return self.current_state in ('APPROACH_FACE', 'INTERACT_FACE', 'MANUAL_CONTROL')
+>>>>>>> origin/blue-line-face
 
     def is_active_target_match(self, target_type, x, y, color=None):
         if self.active_target is None:
@@ -888,10 +906,11 @@ class BehaviorManager(Node):
         return True
 
     def face_callback(self, msg: Marker):
-        if not self.accepts_face_detections():
-            return
 
         if msg.ns and msg.ns != 'face_confirmed':
+            return
+
+        if not self.accepts_face_detections():
             return
 
         x = msg.pose.position.x
@@ -903,8 +922,17 @@ class BehaviorManager(Node):
         qw = msg.pose.orientation.w
         face_yaw = 2.0 * math.atan2(qz, qw)
 
+        if self.current_state == 'MANUAL_CONTROL':
+            self.get_logger().info('Face detected during manual control — disabling blue-line explorer.')
+            disable_msg = Bool()
+            disable_msg.data = False
+            self.blue_line_enabled_pub.publish(disable_msg)
+            wait = False
+        else:
+            wait = True
+
         self.queue_target({'type': 'face', 'x': x, 'y': y, 'z': z, 'color': None, 'face_yaw': face_yaw,
-                           'wait_for_group_end': True})
+                           'wait_for_group_end': wait})
 
     def ring_callback(self, msg: Marker):
         # Rings no longer require approach or interaction — detection only
