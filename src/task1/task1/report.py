@@ -93,7 +93,7 @@ class ReportManager(Node):
         self.barrels_requested = False
         self.barrel_data = []
         self.defect_stations = set()
-        self.requested_by = "Not implemented yet"
+        self.requested_by = "Unknown"
         self._noqr = self.get_parameter("noqr").value
         if self._noqr:
             self.get_logger().info("noqr mode: showing all section headers")
@@ -115,6 +115,9 @@ class ReportManager(Node):
         )
         self.qr_sub = self.create_subscription(
             String, "/qr", self._qr_callback, 10
+        )
+        self.person_sub = self.create_subscription(
+            String, "/recognized_person", self._person_callback, 10
         )
         self.cmd_sub = self.create_subscription(
             String, "/report_commands", self._cmd_callback, 10
@@ -160,6 +163,16 @@ class ReportManager(Node):
             name = msg.data.strip()[7:]
             self.requested_by = name
             self.get_logger().info(f"Task requested by: {name}")
+
+    def _person_callback(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            name = data.get("name", "")
+            if name:
+                self.requested_by = name
+                self.get_logger().info(f"Recognized person: {name}")
+        except Exception:
+            pass
 
     def _marker_to_color(self, marker: Marker):
         r, g, b = round(marker.color.r, 2), round(marker.color.g, 2), round(marker.color.b, 2)
@@ -660,7 +673,7 @@ class ReportManager(Node):
 """
         elif self._noqr:
             text += """## Task: Ring Counting
-**Requested by:** Not implemented yet
+**Requested by:** Unknown
 
 ### Results:
 Task not requested
@@ -687,7 +700,7 @@ Task not requested
 """
         elif self._noqr:
             text += """## Task: Barrel Inspection
-**Requested by:** Not implemented yet
+**Requested by:** Unknown
 
 ### Results:
 Task not requested
@@ -740,7 +753,7 @@ Task not requested
         elif self._noqr:
             text += """## Task: Anomaly Detection
 
-**Requested by:** Not implemented yet
+**Requested by:** Unknown
 
 ### Results:
 Task not requested
