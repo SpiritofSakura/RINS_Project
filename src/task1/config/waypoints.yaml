@@ -27,7 +27,7 @@ waypoints:
   yaw: -1.5708   # South
   pause: 1.0
 
-# ── Waypoint 2 — 270° scan: North → West → South ─────────────────────────────
+# ── Waypoint 2 — 360° scan: North → West → South → East ─────────────────────
 - x: 0.023
   y: -4.385
   yaw: 1.5708    # North
@@ -38,21 +38,25 @@ waypoints:
   pause: 1.0
 - x: 0.023
   y: -4.385
-  yaw: -1.5708   # South (last)
+  yaw: -1.5708   # South
+  pause: 1.0
+- x: 0.023
+  y: -4.385
+  yaw: 0.0       # East
   pause: 1.0
 
-# ── Waypoint 3 — 270° scan: East → North → West ──────────────────────────────
+# ── Waypoint 3 — 270° scan: North → South → East ─────────────────────────────
+- x: -3.070
+  y: -2.942
+  yaw: 1.5708    # North
+  pause: 1.0
+- x: -3.070
+  y: -2.942
+  yaw: -1.5708   # South
+  pause: 1.0
 - x: -3.070
   y: -2.942
   yaw: 0.0       # East
-  pause: 1.0
-- x: -3.070
-  y: -2.942
-  yaw: 1.5708    # North
-  pause: 1.0
-- x: -3.070
-  y: -2.942
-  yaw: 3.1416    # West
   pause: 1.0
 
 # ── Waypoint 4 — 360° scan ────────────────────────────────────────────────────
