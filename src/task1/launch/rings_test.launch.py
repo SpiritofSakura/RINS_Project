@@ -13,7 +13,7 @@ def generate_launch_description():
     )
     ring_model_arg = DeclareLaunchArgument(
         'ring_model',
-        default_value='/home/zeta/ring_yolo/ring_det/weights/best.pt',
+        default_value='/home/zeta/RINS_Project/models/best.pt',
         description='Path to trained YOLO ring model',
     )
     device_arg = DeclareLaunchArgument(
