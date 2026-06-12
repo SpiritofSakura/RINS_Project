@@ -714,7 +714,7 @@ postaja in pošlje Nav2 cilj tipa `approach_workstation`.
 
 Ta del implementacije pokriva samo navigacijski prihod do delovne
 postaje. Vse nadaljnje fino pozicioniranje, pregled tekočega traku in
-obdelava ploščic so opisani v poglavju 3.9.
+obdelava ploščic so opisani v poglavju 3.8.
 
 #### 3.1.5 Rumena in modra črta v navigacijskem toku
 
@@ -965,7 +965,7 @@ Za vsak tip poškodb se poroča: n slik, mean/median/min/max IoU. Po morfološki
 
 #### 3.5.3 Inferenca v realnem času (TileClassifier)
 
-**TileClassifier** (`tile_classifier.py`) je ROS 2 vozlišče, ki se naroči na `/tile_warped` — perspektivno korigirane slike ploščic, ki jih pošilja `tile_detect` med inšpekcijo (opisano v 3.9.4).
+**TileClassifier** (`tile_classifier.py`) je ROS 2 vozlišče, ki se naroči na `/tile_warped` — perspektivno korigirane slike ploščic, ki jih pošilja `tile_detect` med inšpekcijo (opisano v 3.8.4).
 
 **Postopek klasifikacije za vsako ploščico:**
 
@@ -1250,7 +1250,7 @@ namenom. `line_localizator.py` zna zaznavati rumene linije kot splošne
 barvne talne segmente, `station_inspector.py` pa rumeno črto uporablja kot
 lokalni pogoj pri finem pozicioniranju ob delovni postaji. To ni isti
 mehanizem kot varovalo `yellow_line_avoider`, zato je podrobna obravnava
-delovne celice ločena v poglavju 3.9.
+delovne celice ločena v poglavju 3.8.
 
 #### 3.7.2 Vhodi, izhodi in parametri
 
@@ -1432,9 +1432,9 @@ sliko pred robotom. Vris v karto pa je uporaben kot dodatna podpora pri
 testiranju, vizualizaciji ali pri poskusih, kjer želimo rumene linije
 obravnavati kot zasedena območja že na ravni zemljevida.
 
-### 3.9 Inšpektor ploščic
+### 3.8 Inšpektor ploščic
 
-#### 3.9.1 Zaznavanje in pomnjenje lokacije delovne postaje
+#### 3.8.1 Zaznavanje in pomnjenje lokacije delovne postaje
 
 Že med patruliranjem (preden robot prejme kakršnokoli navodilo za
 inšpekcijo) sistem sproti zaznava in si zapomni lokacije delovnih postaj.
@@ -1488,19 +1488,19 @@ stanjih patruliranja (ne v stanjih sledenja črti):
     (napis "WS") na temo `/workstation_markers`.
 
 Ta tema je ključna, saj jo posluša **orkestrator**, ki bo kasneje
-vedel, kam poslati robota (glej 3.9.2). V načinu `--mode toYAML` lahko
+vedel, kam poslati robota (glej 3.8.2). V načinu `--mode toYAML` lahko
 WorkstationRecorder lokacije tudi trajno shrani v datoteko YAML za
 kasnejšo uporabo.
 
 ---
 
-#### 3.9.2 Orkestracija inspekcijskega toka
+#### 3.8.2 Orkestracija inspekcijskega toka
 
 **Orchestrator** (`orchestrator.py`) je centralno vozlišče, ki koordinira
 celotno izvajanje inspekcije. Njegova vloga v inspekcijskem toku:
 
 1.  **Pomnjenje waypointov**: ob prejemu `MarkerArray` na
-    `/workstation_markers` (glej 3.9.1) iz CYLINDER markerjev izlušči
+    `/workstation_markers` (glej 3.8.1) iz CYLINDER markerjev izlušči
     barvo (rdečo ali zeleno) in si shrani (x, y, yaw) pod ustreznim
     ključem v slovar `_waypoints`.
 
@@ -1535,7 +1535,7 @@ celotno izvajanje inspekcije. Njegova vloga v inspekcijskem toku:
 
 ---
 
-#### 3.9.3 Station Inspector: celoten inspekcijski tok
+#### 3.8.3 Station Inspector: celoten inspekcijski tok
 
 **StationInspector** (`station_inspector.py`) je glavno vozlišče, ki
 izvaja celotno sekvenco inspekcije. Njegovo delovanje je modelirano kot
@@ -1654,12 +1654,12 @@ podfaza ima svoj pogoj za prehod.
   delovne postaje. Takrat si zabeleži čas `_end_belt_start` in **vozi
   še 5 sekund naprej**, da zajame še zadnje ploščice, ki so morda še na
   traku.
-- Med skeniranjem `tile_detect` vozlišče (opisano v 3.9.4) prepoznava
+- Med skeniranjem `tile_detect` vozlišče (opisano v 3.8.4) prepoznava
   ploščice in objavlja status na temo `/tile_status`:
   - `"TILE_FOUND"`: robot se **ustavi za 2--4 sekunde** (2 s normalno,
     4 s če smo že za koncem barvne oznake -- da klasifikator dobi dovolj
     časa za zajem čiste slike). V tem času `tile_detect` zajame in
-    objavi warpano sliko ploščice (glej 3.9.4), `tile_classifier` pa
+    objavi warpano sliko ploščice (glej 3.8.4), `tile_classifier` pa
     izvede inferenco. Po preteku časa robot nadaljuje vožnjo.
   - `"TILE_LEFT"`: ploščica je zapustila vidno polje, robot lahko
     nadaljuje z iskanjem naslednje.
@@ -1684,7 +1684,7 @@ podfaza ima svoj pogoj za prehod.
 
 ---
 
-#### 3.9.4 Detekcija in ekstrakcija čistih slik ploščic (TileDetect)
+#### 3.8.4 Detekcija in ekstrakcija čistih slik ploščic (TileDetect)
 
 **TileDetect** (`tile_detect.py`) je ločeno vozlišče, ki se zažene kot
 podproces inspectorja. Njegova naloga je iz top-down slike zgornje kamere
@@ -1774,7 +1774,7 @@ vseskozi, vendar **ploščice aktivno išče le med fazo skeniranja**
 
 ---
 
-#### 3.9.5 Zaključek inspekcijskega toka
+#### 3.8.5 Zaključek inspekcijskega toka
 
 Ko se inspector konča (podfaza 5, korak 2), se:
 1.  Objavi `"finished"` na `/inspector_finish`, kar je signal za vozlišče
@@ -1788,7 +1788,7 @@ Ko se inspector konča (podfaza 5, korak 2), se:
 
 V primeru, da sta v vrsti dve inspekciji (npr. po VREDNE aktivnosti),
 orkestrator po končani prvi samodejno sproži drugo (če so izpolnjeni vsi
-trije pogoji iz 3.9.2).
+trije pogoji iz 3.8.2).
 
 ------------------------------------------------------------------------
 
