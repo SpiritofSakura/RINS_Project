@@ -559,9 +559,7 @@ zabeležijo v končno poročilo.
 
 ## 3. Implementacija in integracija
 
-### 3.0 Arhitektura in ROS2
-
-#### 3.0.1 Pregled arhitekture
+### 3.1 Pregled arhitekture
 
 Sistem je implementiran kot sklop ROS 2 vozlišč v paketu `task1`.
 Vozlišča komunicirajo asinhrono prek tematik (topics), akcij (actions)
@@ -612,7 +610,196 @@ in servisov (services). Spodnja tabela povzema ključna vozlišča.
                                       celotnega sistema
   -----------------------------------------------------------------------
 
-#### 3.0.2 Integracija v ROS 2
+### 3.2 Zaznavanje in prepoznavanje obrazov
+
+Sistem za zaznavanje in prepoznavanje obrazov je sestavljen iz treh vzporedno delujočih vozlišč, ki skupaj tvorijo pipeline: `detect_people` zazna osebo in jo lokalizira v 3D prostoru, `face_recognizer` določi identiteto in spol, `face_localizator` pa zaznave združi v potrjene lokacije v globalnem koordinatnem sistemu.
+
+---
+
+#### 3.2.1 Detekcija oseb in 3D lokalizacija (DetectPeople)
+
+**DetectPeople** (`detect_people.py`) je prvo vozlišče v verigi. Naroči se na RGB sliko (`/oakd/rgb/preview/image_raw`) in oblak točk (`/oakd/rgb/preview/depth/points`).
+
+**Postopek detekcije:**
+
+1. Vsak RGB okvir se posreduje modelu YOLOv8n z vhodom `imgsz=(256, 320)`. Iščejo se samo detekcije razreda 0 (person).
+2. Za vsak zaznani bounding box se izračuna center `(cx, cy)`.
+3. Iz oblaka točk se prebere 3D točka na koordinatah `(cx, cy)` — to je prostorska lega osebe v okvirju kamere.
+4. Lokacija se objavi kot `Marker` na temo `/people_marker` z `frame_id = base_link`.
+
+Vozlišče sprejema parameter `device`, ki se posreduje YOLO modelu za izbiro inference platforme.
+
+---
+
+#### 3.2.2 Prepoznavanje identitete in spola (FaceRecognizer)
+
+**FaceRecognizer** (`face_recognizer.py`) se vzporedno naroči na RGB sliko (`/oakd/rgb/preview/image_raw`) in markerje iz `/people_marker`. Prepoznavanje poteka pri **2 Hz** (throttle = 0,5 s, ker je HOG detekcija računsko zahtevna).
+
+**Referenčna baza oseb:**
+
+Ob zagonu vozlišče prebere vse datoteke `.png` iz mape `config/personnel/`. Ime datoteke kodira identiteto po shemi `ime_zaimek1_zaimek2_vloga.png` (npr. `jana_she_her_manager.png`). Za vsako sliko se z `face_recognition.face_encodings()` izračuna **128-dimenzionalni enkoder**, ki se shrani skupaj z imenom, vlogo, zaimki in izpeljanim spolom.
+
+**Postopek prepoznavanja za vsak okvir:**
+
+1. `face_recognition.face_locations()` z HOG detektorjem poišče vse obraze v sliki.
+2. `face_recognition.face_encodings()` izračuna 128-dimenzionalni enkoder za vsak zaznani obraz.
+3. **Zaznavanje spola** iz izrezanega dela slike: Caffe model `gender_net` (vhod 227×227 px, normalizacija z vrednostmi `[78.4, 87.8, 114.9]`) vrne binarno klasifikacijo moški/ženski.
+4. **Iskanje identitete**: evklidska razdalja med enkodiranjem zaznanega obraza in vsemi referenčnimi enkodirji. Prag zaupanja je privzeto `tolerance = 0,6`. Če se zaznani spol razlikuje od spola najboljšega kandidata v bazi, se prag zaostrí na `0,45`, s čimer se preprečijo napačne prepoznave med osebami različnih spolov s sicer podobnimi enkodirji.
+5. Uspešna prepoznava se objavi na `/recognized_person` kot JSON s polji `name`, `pronouns`, `role`, `gender`, `confidence`, `map_x`, `map_y`. Objava je omejena na enkrat na 2 sekundi na posamezno osebo, da se prepreči poplava sporočil.
+
+Za razhroščevanje se na `/face_debug_image` objavlja anotiran okvir z barvnimi pravokotniki (zeleni = prepoznana oseba, modri = neznan obraz), imenom, spolom in vlogo.
+
+---
+
+#### 3.2.3 Grozdevanje in potrditev lokacij (FaceLocalizator)
+
+**FaceLocalizator** (`face_localizator.py`) je zadnji člen verige. Naroči se na `/people_marker` (lokacije iz DetectPeople) in `/recognized_person` (identitete iz FaceRecognizer).
+
+**Grozdevanje zaznav:**
+
+1. Vsak marker iz `/people_marker` se s TF2 transformacijo pretvori v koordinatni sistem `map`.
+2. Zaznava se zavrže, če je **razdalja do robota večja od 2,5 m** (`max_detection_range`), saj so oddaljene zaznave nezanesljive.
+3. Nova zaznava se doda obstoječemu grozdu, če je znotraj **radija 0,6 m** (`cluster_radius`). Sicer se ustvari nov grozd.
+4. **Centroid grozda** se izračuna kot **mediana** vseh točk po x, y in z — mediana je odporna na osamelce.
+
+**Potrditev osebe:**
+
+Ko grozd doseže **≥5 zaznav** (`threshold_detections`), se preveri, ali na razdalji 0,8 m (`duplicate_radius`) v `marked_locations` že obstaja potrjena lokacija. Če ne:
+
+1. Iz hrambe zadnjih 10 prepoznav (`recent_recognitions`) se poišče najboljša prepoznava v bližini (po zaupanju).
+2. Iz pozicij robota in centroida grozda se izračuna **smer pogleda osebe** (`face_yaw = atan2(robot_y - y, robot_x - x)`) — kot, pri katerem je robot videl obraz, ki ga behavior_manager uporabi za izračun frontalne pristopne poze.
+3. Potrjena lokacija se shrani v `marked_locations` in objavi na `/detected_face_locations` kot dva markerja: zelena krogla (SPHERE, premer 0,3 m) in lebdeče besedilo (TEXT_VIEW_FACING) z imenom osebe.
+
+**Posodobitev identitete po potrditvi:** Vsaka nova prepoznava iz `/recognized_person` se primerja z že potrjenimi lokacijami. Če prihaja z razdalje ≤0,8 m in ima višje zaupanje od dosedaj shranjenega, se marker v RViz2 posodobi z novim imenom — obraz, ki je bil sprva označen kot "Unknown", se tako naknadno identificira, ko se robot dovolj približa.
+
+### 3.3 Zaznavanje obročev
+
+Sistem za zaznavanje obročev je sestavljen iz dveh vozlišč: `detect_rings_v2` zazna kandidate v posameznem okviru s Houghevo transformacijo, `ring_localizator` pa zaznave združuje v stabilne, potrjene lokacije v globalnem koordinatnem sistemu.
+
+---
+
+#### 3.3.1 Zaznavanje obročev v sliki (RingDetectorV2)
+
+**RingDetectorV2** (`detect_rings_v2.py`) se naroči na RGB sliko (`/oakd/rgb/preview/image_raw`), globinsko sliko (`/oakd/rgb/preview/depth`, 16UC1 v mm) in oblak točk (`/oakd/rgb/preview/depth/points`). Aktivno deluje le v stanjih `IDLE` in `PATROL`.
+
+**Priprava globinske slike:**
+
+1. Globinska slika se pretvori iz 16UC1 (mm) v float32 (m).
+2. Slika se omeji na **zgornjo polovico** kadra — obroči visijo na stojalih, spodnja polovica vsebuje le tla in šum.
+3. Globina se pretvori v **disparitetno sliko** (1/globina_m), kar ojača bližnje strukture in naredi krožne oblike bolj izrazite.
+4. Disparitetna slika se normalizira na 8-bit in zglajena z Gaussovim jedrom 5×5.
+
+**Zaznavanje krogov s Houghevo transformacijo:**
+
+`cv2.HoughCircles` z nastavitvami `dp=1`, `minDist=40`, `param1=48`, `param2=25`, `minRadius=1`, `maxRadius=70` poišče krožne robove v disparitetni sliki.
+
+**Validacija in barvna maska za vsak zaznani krog (`_evaluate_circle`):**
+
+1. Krog se zavrže, če center leži preblizu roba slike (manj kot en radij od meje).
+2. Ustvari se maska okroglega območja in se **razširi za 20 %** z morfološko dilatacijo — s tem se zajamejo robni piksli obroča.
+3. Razširjena maska se kombinira z masko veljavnih globinskih točk (disparity > 0), s čimer se izločijo piksli brez globine.
+4. **Barvni filter**: na HSV sliki se izdela maska za znane barve obročev (rdeča, zelena, modra, črna). Kombinirana maska se AND-a z barvno masko — ohranjeni so le piksli z veljavno globino in znano barvo.
+5. Iz zamaskiranih pikslov se iz oblaka točk izračuna **povprečna 3D pozicija** obroča v okvirju kamere.
+
+**Klasifikacija barve** poteka na osnovi maskiranih pikslov: izračuna se povprečna BGR vrednost, pretvori v HSV in razvrsti po preprosti HSV tabeli (rdeča, zelena, modra, črna; nizka nasičenost → črna).
+
+Vsaka veljavna detekcija se objavi na `/ring_marker` z `frame_id = base_link` in **življenjsko dobo 200 ms** — markerji so namenjeni samo za takoj. Trajno hrambo prevzame `ring_localizator`.
+
+---
+
+#### 3.3.2 Grozdevanje in potrditev lokacij (RingLocalizator)
+
+**RingLocalizator** (`ring_localizator.py`) se naroči na `/ring_marker` in akumulira zaznave v grozdih v koordinatnem sistemu `map`.
+
+**Grozdevanje:**
+
+Vsak prejeti marker se s TF2 transformira v map frame. Nova zaznava se doda obstoječemu grozdu, če je znotraj **radija 1,0 m** (`CLUSTER_RADIUS`). Sicer se ustvari nov grozd. Centroid se posodablja z inkrementalnim povprečjem.
+
+**Trostopenjski sistem potrditve:**
+
+| Stanje | Prag zaznav | Radij markerja | Prosojnost |
+|---|---|---|---|
+| `ring_candidate` | ≥2 | 0,110 m | 45 % |
+| `ring_actionable` | ≥4 | 0,150 m | 85 % |
+| `ring_confirmed` | ≥6 | 0,175 m | 100 % |
+
+Za prehod v `ring_actionable` in `ring_confirmed` mora grozd prestati **test kompaktnosti**: vsaj 60 % točk mora biti znotraj radija 0,30 m od mediane grozda. S tem se izločijo lažni grozdi, ki so nastali iz zaznav istega obroča z zelo različnih zornih kotov.
+
+**Preprečevanje podvajanja:** preden se grozd potrdi, se preveri, ali na razdalji manj kot 1,2 m (`MIN_MARK_DIST`) že obstaja drug potrjen obroč. Če je, se nov grozd označi kot potlačen (`suppressed`).
+
+**Robustni centroid** potrjenega obroča se izračuna kot **mediana** kompaktnih točk (inlierjev) po x, y in z — mediana je odporna na osamelce iz slabih globinskih meritev.
+
+V RViz2 se vsak obroč vizualizira kot `LINE_STRIP` v obliki kroga (36 točk) v ustrezni barvi obroča.
+
+---
+
+### 3.4 Zaznavanje sodov
+
+Sistem za zaznavanje sodov je sestavljen iz štirih vozlišč: `cylinder_segmentation` zazna cilindrične oblike v oblaku točk, `cylinder_localizator` jih clustra in potrdi v map frame, `barrel_inspector` sproži inšpekcijo ležečih sodov, `pointcloud_viewer` pa izvede dejansko zaznavanje razlitja.
+
+---
+
+#### 3.4.1 Segmentacija cilindrov iz oblaka točk (CylinderSegmentation)
+
+**CylinderSegmentation** (`cylinder_segmentation.cpp`) je C++ vozlišče, ki obdeluje oblak točk iz OAK-D kamere (`/oakd/rgb/preview/depth/points`). Med obračanjem (kotna hitrost > 0,2 rad/s) se obdelava preskoči, saj gibanje kamere povzroča artefakte.
+
+**Predprocesiranje oblaka točk:**
+
+1. **Passthrough filter**: ohranijo se točke v razponu x = [0, 2,5 m] in z = [-0,25, 0,5 m] — izreže se ozadje in tla.
+2. **VoxelGrid downsampling** z ločljivostjo 1,5 cm × 1,5 cm × 1,5 cm zmanjša oblak ~4× in pohitri RANSAC.
+3. **Odstranitev ravnin**: do 3 dominantne ravnine (tla, stene) se iterativno odstranijo z RANSAC algoritmom za ravnine (prag 0,02 m), da cilindrični segmentator ne pritrdi na robove sten.
+
+**RANSAC segmentacija cilindrov:**
+
+Normalni vektorji se ocenijo z iskanjem k=20 sosedov. `SACSegmentationFromNormals` iščemodel valja z nastavitvami: ciljna polmer 0,14 m ± 0,04 m (Gazebo sodi), `normal_distance_weight=0.1`, `distance_threshold=0.01`, max 150 iteracij. Brez omejitve osi — zaznani so tako pokončni kot ležeči sodi.
+
+**Filtriranje lažnih zaznav:**
+
+- **Z-razpon** inlierjev mora biti med 0,07 m in 0,70 m — izloči talne oznake in ravne objekte.
+- **Barvni filter (HSV)**: iz povprečne RGB vrednosti inlierjev se izračuna nasičenost in svetlost. Objekt se zavrže, če nasičenost < 0,22 IN svetlost > 0,25 — s tem se izključijo sivi in bež zaboji, medtem ko črni sodi (nizka svetlost) prestanejo filter.
+- **Orientacija**: iz komponent osi valja se izračuna `|az / |osi||`; vrednost > 0,5 pomeni pokončen sod, sicer ležeč.
+
+Vsak veljavni cilindrični segment se objavi na `cylinder_markers` z `marker.text = "vertical"/"horizontal"` in življenjsko dobo 2 s.
+
+---
+
+#### 3.4.2 Grozdevanje in potrditev (CylinderLocalizator)
+
+**CylinderLocalizator** (`cylinder_localizator.py`) sprejema markerje iz `cylinder_markers`, jih s TF2 transformira v map frame in accumula v grozdih.
+
+**Grozdevanje:**
+
+Nova zaznava se doda obstoječemu grozdu, ki ima enako orientacijo in združljivo barvo, če je znotraj radija **0,33 m** (pokončni sodi) oziroma **0,70 m** (ležeči, ker se centroid bolj razlikuje glede na zorni kot). Barva in orientacija grozda se sproti glasujeta: vsaka zaznava doda glas za svojo klasifikacijo, ob potrditvi zmaga večina.
+
+**Potrditev in preprečevanje podvajanja:**
+
+- Grozd se vizualizira kot kandidat po ≥4 zaznavah in potrdi po **≥10 zaznavah** (CONFIRM_THRESH).
+- Za potrditev mora grozd prestati test kompaktnosti: vsaj 60 % točk mora biti znotraj 0,32 m od mediane.
+- Pred potrditvijo se preveri, da drug potrjeni sod ni bližje kot 0,18 m (fizično prekrivanje) oziroma 0,48 m za isti tip/barvo (pokončni) ali 1,5 m (ležeči — centrodi bolj razpršeni).
+- **Robustni centroid** se izračuna kot mediana kompaktnih inlierjev po x, y in z.
+
+Potrjeni sod se objavi na `/detected_cylinder_locations` s poljem `marker.text` (orientacija) in barvno kodiranim RGB. Vzporedno se shrani vstop v JSON poročilo in slika iz OAK-D kamere.
+
+---
+
+#### 3.4.3 Inšpekcija sodov in zaznavanje razlitja
+
+**BarrelInspector** (`barrel_inspector.py`) posluša `/detected_cylinder_locations`. Ob potrditvi soda:
+
+- **Pokončni sod**: razlitje ni mogoče, rezultat se takoj objavi na `/barrel_inspection_result` z `leak_detected = false`.
+- **Ležeči sod**: objavi se vmesni rezultat `null` (zaznava razlitja še ni znanana). Ko `behavior_manager` pripelje robota na ustrezno pristopno točko, pošlje sprožilec `/spill_check_trigger` z ID-jem soda.
+
+**PointCloudSpillCheck** (`pointcloud_viewer.py`) streže servis `/spill_check` (tip `Trigger`). Ob klicu:
+
+1. Vzame zadnji zajet oblak točk (`/oakd/rgb/preview/depth/points`).
+2. **Filter razdalje**: ohranijo se le točke do 1,0 m od kamere.
+3. **Transformacija v map frame** s TF2.
+4. **Z-rezina**: izreže se horizontalni pas med 0,5 cm in 15 cm nad tlemi (`SLICE_Z_MIN=0.005`, `SLICE_Z_MAX=0.15`).
+5. Razlitje je zaznano, če Z-rezina vsebuje **≥4000 točk** (`SPILL_POINT_THRESH`).
+
+Rezina se objavi na `/slice_points` za vizualno preverjanje v RViz2. Rezultat se vrne `BarrelInspectorju`, ki sproži glasovni izhod (espeak) in shrani fotografijo ob ležečem sodu z razlitjem.
+
+### 3.6 Integracija v ROS 2
 
 Vse komponente se zaženejo z `task1.launch.py`. Nav2 sklad se zažene
 ločeno z `localization.launch.py`. Vozlišča komunicirajo prek: -
@@ -623,51 +810,55 @@ inšpekcija razlitja (`/``spill_check`).
 Za vizualizacijo in razhroščevanje smo v RViz2 prikazali vse zaznavne
 markerje in stanje sistema.
 
-### 3.3 Zaznavanje obrazov
+### 3.7 Zaznavanje poškodb ploščic
 
-`FaceRecognizer` se naroči na temo
-`/``oakd``/``rgb``/``preview``/``image_raw`. Detekcija poteka pri 2 Hz
-(omejitev CPE). Za vsak zaznan obraz:
+Sistem za zaznavanje poškodb ploščic temelji na U-Net segmentacijskem modelu, ki je bil posebej treniran za klasifikacijo površinskih razpok in strukturnih poškodb na dveh težavnostnih nivojih. Sistem obsega treniranje modela, evalvacijo in izbiro praga ter inferenčno vozlišče v ROS 2.
 
-1.  `face_recognition.face_locations``()` določi položaje obrazov v
-    sliki (HOG detektor),
-2.  `face_recognition.face_encodings``()` izračuna 128-dimenzionalni
-    enkoder,
-3.  Caffe gender model klasificira spol iz izrezanega območja obraza,
-4.  Evklidska razdalja do referenčnih enkoderjev znanih oseb določi
-    identiteto,
-5.  Rezultat (ime, vloga, spol, zaupanje) se objavi na
-    `/``recognized_person`.
+---
 
-`FaceLocalizator` grupira zaznave v oblake (cluster radius 0,6 m) in s
-TF2 pretvori položaj v map frame. Obraz je potrjen po ≥5 zaznav.
+#### 3.7.1 Treniranje modela (unet_train.py)
 
-### 3.4 Zaznavanje sodov
+Model je arhitekture **U-Net** z enkodirjem ResNet-34, predhodno naučenim na ImageNet (`segmentation_models_pytorch`). Vhod je RGB slika 512×512 px, izhod je binarna segmentacijska maska poškodbe.
 
-`CylinderLocalizator` sprejema segmentacije iz
-`/``detected_cylinder_locations` (že v map frame). Za vsako zaznavo:
+**Podatkovni nabor:**
 
-1.  Preveri razdaljo do vseh obstoječih grozdov,
-2.  Doda točko obstoječemu grozdu ali ustvari novega,
-3.  Po ≥10 zaznav grozd potrdi in objavi vizualizacijski marker v RViz2,
-4.  **Barvna klasifikacija**: mediana RGB vrednosti pikslov → pretvorba
-    v HSV → klasifikacija v enega od 8 barvnih razredov,
-5.  **Orientacija**: glasovanje po analizi oblike točkovnega oblaka
-    (pokončen/ležeč),
-6.  `BarrelInspector` sproži `/``spill_check` servis po potrditvi.
+Slike so organizirane v tri razrede poškodb (`damaged_0`, `damaged_1`, `damaged_3`) ter razred nepoškodovanih ploščic (`okay_*`). Nabor se stratificirano razdeli v učno (80 %) in validacijsko (20 %) množico, da se ohrani razmerje med razredi v obeh delih.
 
-### 3.5 Zaznavanje poškodb ploščic
+**Predprocesiranje in augmentacije:**
 
-`TileClassifier` se naroči na sliko armne kamere. Za vsako sliko:
+Vsaka slika se predhodno obdela s **CLAHE** (clip_limit=4, tile_grid=8×8) za izboljšanje lokalnega kontrasta, nato normalizira z ImageNet parametri (μ=[0.485, 0.456, 0.406], σ=[0.229, 0.224, 0.225]). Med treningom se izvajajo naslednje augmentacije: horizontalni in vertikalni zrcalni odsev, rotacija za 90°, elastična transformacija, distorzija mreže, naključna sprememba svetlosti in kontrasta ter Gaussov šum.
 
-1.  CLAHE predprocesiranje (clip_limit=4, tile_grid=8×8),
-2.  Skaliranje na 512×512 in normalizacija z ImageNet parametri
-    (μ=\[0.485, 0.456, 0.406\], σ=\[0.229, 0.224, 0.225\]),
-3.  U-Net inferenca (segmentation_models_pytorch, ResNet34 backbone),
-4.  Sigmoidna aktivacija + morfološka poobdelava,
-5.  Poškodba zaznana, če razmerje poškodovanih pikselov \> 0,2 %;
-    rezultat objavi na `/``tile_defect`.
+**Funkcija izgube:**
 
+Skupna izguba je kombinacija treh členov: `0.35 × BCE + 0.35 × Tversky + 0.3 × ClDice`. Tversky izguba (α=0.2, β=0.8) kaznuje napačno klasificirane poškodovane piksle bolj kot lažne pozitivne. **ClDice** (Centerline Dice) je posebna izguba, ki kaznuje missing skelete in konice razpok ter izboljša zveznost segmentiranih linij. BCE utež za pozitivne piksle (`pos_weight`) se izračuna iz razmerja negativnih in pozitivnih pikslov v učni množici (omejena na 10), kar kompenzira razredno neravnovesje.
+
+**Optimizacija:**
+
+Optimizer: Adam (`lr=1e-4`). Urnik: CosineAnnealingLR (`T_max=50`). Zgodnje ustavljanje po 10 epohah brez izboljšanja validacijskega Dice koeficienta. Najboljši model se shrani v `results/unet/best_model.pth`.
+
+---
+
+#### 3.7.2 Evalvacija in izbira praga (unet_evaluate.py)
+
+Po treniranju skripta `unet_evaluate.py` izvede **pregled pragov** v razponu [0,20 ... 0,70] na testni množici. Za vsak prag se izračuna povprečni IoU čez vse razrede poškodb. Izbere se prag z najboljšim skupnim povprečnim IoU.
+
+Za vsak tip poškodb se poroča: n slik, mean/median/min/max IoU. Po morfološki poobdelavi (odpiranje 3×3, zapiranje 5×5) se shranijo vizualizacijska primerjalna polja: originalna slika | napoved (modra) | referenčna maska (zelena).
+
+---
+
+#### 3.7.3 Inferenca v realnem času (TileClassifier)
+
+**TileClassifier** (`tile_classifier.py`) je ROS 2 vozlišče, ki se naroči na `/tile_warped` — perspektivno korigirane slike ploščic, ki jih pošilja `tile_detect` med inšpekcijo (opisano v 3.9.4).
+
+**Postopek klasifikacije za vsako ploščico:**
+
+1. BGR slika se pretvori v RGB in obdela s transformacijami: CLAHE → resize 512×512 → normalizacija z ImageNet parametri.
+2. U-Net inferenca na GPU/CPU z onemogočenim gradientom.
+3. Sigmoidna aktivacija vrne verjetnostno masko.
+4. Maska se binarizira s pragom **0,20** (`THRESHOLD`) in morfološko poobdela (odpiranje 3×3, zapiranje 5×5).
+5. Izračuna se razmerje poškodovanih pikslov. Ploščica je klasificirana kot **`DEFECT`**, če je razmerje ≥ 0,2 % (`MIN_DEFECT_RATIO = 0.002`), sicer **`OK`**.
+6. Rezultat se objavi na `/tile_classification` v obliki `"DEFECT:tile_id"` oziroma `"OK:tile_id"`, kjer je `tile_id` zaporedna številka ploščice.
+7. Na `/tile_heatmap` se objavi vizualizacija: verjetnostna mapa JET barvne palete, preložena čez originalno sliko ploščice (50/50).
 
 ### 3.9 Inšpektor ploščic
 
