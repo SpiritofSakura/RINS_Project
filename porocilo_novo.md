@@ -583,56 +583,160 @@ zabeležijo v končno poročilo.
 
 ## 3. Implementacija in integracija
 
-### 3.1 Pregled arhitekture
+### 3.0 Pregled arhitekture
 
-Sistem je implementiran kot sklop ROS 2 vozlišč v paketu `task1`.
-Vozlišča komunicirajo asinhrono prek tematik (topics), akcij (actions)
-in servisov (services). Spodnja tabela povzema ključna vozlišča.
+Sistem je implementiran kot sklop ROS 2 vozlišč, večinoma v paketu `task1`,
+z dodatnimi vozlišči za zaznavanje oseb in segmentacijo cilindrov. Posamezna
+vozlišča imajo jasno ločene naloge: navigacija, zaznavanje, lokalizacija
+objektov, varnostni odzivi, pregled delovne postaje in priprava končnega
+poročila. Spodnja tabela povzema glavne komponente, ki so pomembne za
+integracijo celotnega sistema.
 
-  -----------------------------------------------------------------------
-  Vozlišče                            Opis
-  ----------------------------------- -----------------------------------
-  `waypoint_navigator`                Obhodnja predefiniranih točk prek
-                                      Nav2 `NavigateToPose` akcije
+| Vozlišče | Vloga v sistemu |
+|---|---|
+| `waypoint_navigator` | Izvaja obhod po vnaprej določenih točkah prek Nav2 akcije `NavigateToPose`. |
+| `behavior_manager` | Centralno vodi stanja robota in preklaplja med patruljo, začasnimi cilji, delovno postajo, zaključno točko ter sledenjem modri črti. |
+| `detect_people` | Zazna osebe v sliki in objavi njihove 3D lokacije. |
+| `face_recognizer` | Prepozna identiteto in spol oseb iz slike kamere. |
+| `face_localizator` | Združuje zaznave obrazov in potrjene lokacije objavi v koordinatnem sistemu `map`. |
+| `detect_rings_v2` | Zaznava obroče z računalniškim vidom in globinsko verifikacijo. |
+| `ring_localizator` | Združuje in potrjuje zaznave obročev. |
+| `cylinder_segmentation` | Iz oblaka točk segmentira cilindrične objekte in objavi začetne markerje sodov. |
+| `cylinder_localizator` | Združuje zaznave sodov, določi barvo, orientacijo in pripravi podatke za poročilo. |
+| `barrel_inspector` | Izvede preverjanje razlitja pri ležečih sodih. |
+| `line_localizator` | Zaznava barvne talne linije in jih objavlja kot markerje. |
+| `workstation_recorder` | Iz zaznanih linij določi pristopne poze delovnih postaj. |
+| `yellow_line_avoider` | Deluje kot reaktivni varnostni sloj za preprečevanje prečkanja rumene črte. |
+| `blue_line_explorer` | Po zaključku prve sobe prevzame vizualno sledenje modri črti. |
+| `station_inspector` | Vodi celoten tok pregleda delovne postaje in fino pozicioniranje robota. |
+| `tile_detect` | Iz slike zgornje kamere izreže posamezne ploščice na tekočem traku. |
+| `tile_classifier` | S klasifikacijskim modelom zazna poškodbe ploščic. |
+| `qr_reader` | Bere QR kode z navodili in zaključno kodo za generiranje poročila. |
+| `report_manager` | Zbira rezultate in generira končno poročilo. |
+| `robot_state_overlay` | V RViz prikazuje trenutno stanje robota. |
+| `orchestrator` | Skrbi za višjenivojsko koordinacijo procesov, ki se zaženejo po potrebi. |
 
-  `behavior_manager`                  Centralni nadzornik stanj (IDLE →
-                                      PATROLLING → APPROACHING →
-                                      INTERACTING)
+Komunikacija med vozlišči poteka predvsem prek:
 
-  `face_recognizer`                   Zaznavanje in prepoznavanje obrazov
-                                      z dlib + Caffe gender modelom
+- **tem** za slike, markerje, stanja, zaznave in hitrostne ukaze,
+- **akcije** `NavigateToPose` za ciljno navigacijo prek Nav2,
+- **parametrov** za nastavljanje pragov, hitrosti in kamer,
+- **pomožnih skript** za testiranje posameznih modulov in pripravo karte.
 
-  `face_localizator`                  Grozdevanje in potrditev zaznav
-                                      obrazov v map frame
+### 3.1 Navigacija
 
-  `detect_rings_v2`                   Zaznavanje obročev s Houghevo
-                                      transformacijo na disparitetni
-                                      sliki
+Implementacija navigacije je razdeljena med več ROS 2 vozlišč, pri čemer
+Nav2 skrbi za samo planiranje in izvajanje poti, vozlišče
+`behavior_manager` pa skrbi za odločanje, kdaj se posamezen navigacijski
+način vključi ali ustavi.
 
-  `ring_localizator`                  Grozdevanje in potrditev zaznav
-                                      obročev
+#### 3.1.1 Waypoint patrulja
 
-  `cylinder_localizator`              Grozdevanje zaznav sodov, določanje
-                                      barve in orientacije
+Patruljiranje po prvi sobi izvaja vozlišče `waypoint_navigator.py`.
+Vozlišče ob zagonu naloži seznam točk iz `config/waypoints.yaml`. Vsaka
+točka vsebuje:
 
-  `barrel_inspector`                  Inšpekcija sodov, preverjanje
-                                      razlitja
+- `x`, `y` - položaj cilja v koordinatnem sistemu `map`,
+- `yaw` - orientacijo robota na cilju,
+- `pause` - čas mirovanja po prihodu na cilj.
 
-  `line_localizator`                  Zaznavanje barvnih linij z HSV
-                                      segmentacijo
+Za vsako točko se sestavi `PoseStamped` cilj in pošlje na Nav2 akcijo
+`navigate_to_pose` tipa `NavigateToPose`. Po uspešno doseženem cilju
+vozlišče poveča indeks trenutne točke in po potrebi počaka nastavljeni
+premor. Če ima več zaporednih ciljev enake koordinate in različne
+orientacije, robot na isti fizični lokaciji izvede pregled v več smereh.
 
-  `blue_line_explorer`                Sledenje modri črti po zaključku
-                                      patruliranja
+Patrulja se ne izvaja ves čas, temveč jo omogoča ali ustavlja
+`behavior_manager` prek teme `/patrol_enabled`. Ko so opravljene vse
+točke, `waypoint_navigator` objavi `/patrol_finished`, kar sproži prehod
+na naslednji del naloge.
 
-  `tile_classifier`                   Zaznavanje poškodb ploščic z U-Net
-                                      modelom
+#### 3.1.2 Centralni nadzor stanj
 
-  `station_inspector`                 Nadzor inšpekcijskega procesa
-                                      delovnih postaj
+Vozlišče `behavior_manager.py` je centralni nadzornik navigacijskega
+toka. Objavlja trenutno stanje robota na `/robot_state`, hkrati pa
+upravlja, ali je aktivna patrulja, začasni pristop do zaznanega objekta,
+prehod na delovno postajo ali sledenje modri črti.
 
-  `orchestrator`                      Visokonivojska koordinacija
-                                      celotnega sistema
-  -----------------------------------------------------------------------
+Najpomembnejša stanja za navigacijo so:
+
+- `IDLE` - robot miruje in čaka na začetek naloge,
+- `PATROL` - aktivna je waypoint patrulja,
+- `APPROACH_FACE` / `INTERACT_FACE` - robot se približa osebi in izvede
+  interakcijo,
+- `APPROACH_BARREL` / `INTERACT_BARREL` - robot se približa ležečemu
+  cilindru oziroma sodu,
+- `APPROACH_WORKSTATION` - robot se pelje do pristopne točke delovne
+  postaje,
+- `FINISHING_ROUNDS` - robot gre proti zaključni točki pred drugo sobo,
+- `FOLLOW_BLUE_LINE` - nadzor prevzame sledenje modri črti.
+
+`behavior_manager` spremlja tudi `/amcl_pose`, saj brez veljavne poze
+robota ne more izračunati varnih pristopnih točk do zaznanih objektov.
+Če navigacijski strežnik Nav2 še ni pripravljen ali AMCL poza še ni
+znana, se začasni cilji ne pošiljajo.
+
+#### 3.1.3 Začasni cilji med patruljo
+
+Med patruljo `behavior_manager` prejema potrjene zaznave objektov iz
+lokalizacijskih vozlišč. Za navigacijo so pomembne predvsem teme:
+
+- `/detected_face_locations` - potrjene lokacije obrazov,
+- `/detected_cylinder_locations` - potrjene lokacije cilindrov oziroma
+  sodov,
+- `/patrol_group_end` - signal, da je robot zaključil pregled ene
+  waypoint lokacije,
+- `/target_done` in `/resume_patrol` - zaključek interakcije in vrnitev v
+  patruljo.
+
+Pri obrazu se patrulja začasno ustavi, iz orientacije obraza in trenutne
+poze robota pa se izračuna pristopna točka pred osebo. Ta se pošlje kot
+začasni `NavigateToPose` cilj. Po prihodu na cilj robot preide v
+interakcijo, nato pa se obraz doda na seznam že obdelanih ciljev, da ga
+sistem ne obišče ponovno.
+
+Pri obročih navigacija praviloma ne pošlje dodatnega cilja, saj se
+obroči samo zaznajo, lokalizirajo in zabeležijo med patruljo. Zato
+zaznava obroča ne prekine waypoint navigacije.
+
+Pri cilindrih se pokončni cilindri samo zabeležijo. Če je cilinder
+zaznan kot ležeč, se ustvari začasni cilj ob cilindru z varnim odmikom,
+da se robot objektu približa, vendar ne zapelje neposredno vanj. Po
+zaključku obdelave se robot vrne v stanje patrulje.
+
+#### 3.1.4 Prehod do delovne postaje
+
+Ko QR bralnik objavi navodilo na `/qr`, si `behavior_manager` zapomni,
+ali mora robot obiskati rdečo ali zeleno delovno postajo. Prehod se ne
+izvede takoj, temveč šele po zaključku patrulje. Takrat se iz
+`/workstation_markers` oziroma že znanih pristopnih poz izbere ustrezna
+postaja in pošlje Nav2 cilj tipa `approach_workstation`.
+
+Ta del implementacije pokriva samo navigacijski prihod do delovne
+postaje. Vse nadaljnje fino pozicioniranje, pregled tekočega traku in
+obdelava ploščic so opisani v poglavju 3.9.
+
+#### 3.1.5 Rumena in modra črta v navigacijskem toku
+
+Rumena črta je implementirana kot reaktivni varnostni sloj v vozlišču
+`yellow_line_avoider.py`. Vozlišče spremlja sliko zgornje kamere in v
+stanju `CLEAR` ne posega v navigacijo. Če rumeno črto zazna v nevarnem
+območju slike, preide v stanje `BACKING`, objavi hitrostne ukaze na
+`/cmd_vel_unstamped` in `/cmd_vel` ter robota za kratek čas umakne nazaj.
+S tem lahko začasno preglasi običajne ukaze patrulje ali Nav2.
+
+Po zaključku navigacije po prvi sobi `behavior_manager` robota pošlje na
+zaključno točko, nato pa omogoči vozlišče `blue_line_explorer.py` prek
+teme `/blue_line_enabled`. Takrat se stanje robota spremeni v
+`FOLLOW_BLUE_LINE`, nepotrebna zaznavna vozlišča se ustavijo, nadzor nad
+gibanjem pa prevzame vizualno sledenje modri črti. `blue_line_explorer`
+objavlja ukaze na `/cmd_vel_unstamped` in stanje/debug informacije na
+`/blue_line/status` ter `/blue_line/debug_image`.
+
+S tem je navigacija v implementaciji razdeljena na tri povezane dele:
+Nav2 za globalne premike po karti, `behavior_manager` za preklapljanje
+med fazami in namenski reaktivni moduli za posebna pravila gibanja
+(rumena in modra črta).
 
 ### 3.2 Zaznavanje in prepoznavanje obrazov
 
@@ -823,165 +927,6 @@ Potrjeni sod se objavi na `/detected_cylinder_locations` s poljem `marker.text` 
 
 Rezina se objavi na `/slice_points` za vizualno preverjanje v RViz2. Rezultat se vrne `BarrelInspectorju`, ki sproži glasovni izhod (espeak) in shrani fotografijo ob ležečem sodu z razlitjem.
 
-### 3.6 Integracija v ROS 2
-
-Vse komponente se zaženejo z `task1.launch.py`. Nav2 sklad se zažene
-ločeno z `localization.launch.py`. Vozlišča komunicirajo prek: -
-**Tematik (topics)**: zaznave, slike, markerji, stanja robota, - **Akcij
-(actions)**: navigacija (`NavigateToPose`), - **Servisov (services)**:
-inšpekcija razlitja (`/``spill_check`).
-
-Za vizualizacijo in razhroščevanje smo v RViz2 prikazali vse zaznavne
-markerje in stanje sistema.
-
-### 3.1 Navigacija
-
-Implementacija navigacije je razdeljena med več ROS 2 vozlišč, pri čemer
-Nav2 skrbi za samo planiranje in izvajanje poti, vozlišče
-`behavior_manager` pa skrbi za odločanje, kdaj se posamezen navigacijski
-način vključi ali ustavi.
-
-#### 3.1.1 Waypoint patrulja
-
-Patruljiranje po prvi sobi izvaja vozlišče `waypoint_navigator.py`.
-Vozlišče ob zagonu naloži seznam točk iz `config/waypoints.yaml`. Vsaka
-točka vsebuje:
-
-- `x`, `y` - položaj cilja v koordinatnem sistemu `map`,
-- `yaw` - orientacijo robota na cilju,
-- `pause` - čas mirovanja po prihodu na cilj.
-
-Za vsako točko se sestavi `PoseStamped` cilj in pošlje na Nav2 akcijo
-`navigate_to_pose` tipa `NavigateToPose`. Po uspešno doseženem cilju
-vozlišče poveča indeks trenutne točke in po potrebi počaka nastavljeni
-premor. Če ima več zaporednih ciljev enake koordinate in različne
-orientacije, robot na isti fizični lokaciji izvede pregled v več smereh.
-
-Patrulja se ne izvaja ves čas, temveč jo omogoča ali ustavlja
-`behavior_manager` prek teme `/patrol_enabled`. Ko so opravljene vse
-točke, `waypoint_navigator` objavi `/patrol_finished`, kar sproži prehod
-na naslednji del naloge.
-
-#### 3.1.2 Centralni nadzor stanj
-
-Vozlišče `behavior_manager.py` je centralni nadzornik navigacijskega
-toka. Objavlja trenutno stanje robota na `/robot_state`, hkrati pa
-upravlja, ali je aktivna patrulja, začasni pristop do zaznanega objekta,
-prehod na delovno postajo ali sledenje modri črti.
-
-Najpomembnejša stanja za navigacijo so:
-
-- `IDLE` - robot miruje in čaka na začetek naloge,
-- `PATROL` - aktivna je waypoint patrulja,
-- `APPROACH_FACE` / `INTERACT_FACE` - robot se približa osebi in izvede
-  interakcijo,
-- `APPROACH_BARREL` / `INTERACT_BARREL` - robot se približa ležečemu
-  cilindru oziroma sodu,
-- `APPROACH_WORKSTATION` - robot se pelje do pristopne točke delovne
-  postaje,
-- `FINISHING_ROUNDS` - robot gre proti zaključni točki pred drugo sobo,
-- `FOLLOW_BLUE_LINE` - nadzor prevzame sledenje modri črti.
-
-`behavior_manager` spremlja tudi `/amcl_pose`, saj brez veljavne poze
-robota ne more izračunati varnih pristopnih točk do zaznanih objektov.
-Če navigacijski strežnik Nav2 še ni pripravljen ali AMCL poza še ni
-znana, se začasni cilji ne pošiljajo.
-
-#### 3.1.3 Začasni cilji med patruljo
-
-Med patruljo `behavior_manager` prejema potrjene zaznave objektov iz
-lokalizacijskih vozlišč. Za navigacijo so pomembne predvsem teme:
-
-- `/detected_face_locations` - potrjene lokacije obrazov,
-- `/detected_cylinder_locations` - potrjene lokacije cilindrov oziroma
-  sodov,
-- `/patrol_group_end` - signal, da je robot zaključil pregled ene
-  waypoint lokacije,
-- `/target_done` in `/resume_patrol` - zaključek interakcije in vrnitev v
-  patruljo.
-
-Pri obrazu se patrulja začasno ustavi, iz orientacije obraza in trenutne
-poze robota pa se izračuna pristopna točka pred osebo. Ta se pošlje kot
-začasni `NavigateToPose` cilj. Po prihodu na cilj robot preide v
-interakcijo, nato pa se obraz doda na seznam že obdelanih ciljev, da ga
-sistem ne obišče ponovno.
-
-Pri obročih navigacija praviloma ne pošlje dodatnega cilja, saj se
-obroči samo zaznajo, lokalizirajo in zabeležijo med patruljo. Zato
-zaznava obroča ne prekine waypoint navigacije.
-
-Pri cilindrih se pokončni cilindri samo zabeležijo. Če je cilinder
-zaznan kot ležeč, se ustvari začasni cilj ob cilindru z varnim odmikom,
-da se robot objektu približa, vendar ne zapelje neposredno vanj. Po
-zaključku obdelave se robot vrne v stanje patrulje.
-
-#### 3.1.4 Prehod do delovne postaje
-
-Ko QR bralnik objavi navodilo na `/qr`, si `behavior_manager` zapomni,
-ali mora robot obiskati rdečo ali zeleno delovno postajo. Prehod se ne
-izvede takoj, temveč šele po zaključku patrulje. Takrat se iz
-`/workstation_markers` oziroma že znanih pristopnih poz izbere ustrezna
-postaja in pošlje Nav2 cilj tipa `approach_workstation`.
-
-Ta del implementacije pokriva samo navigacijski prihod do delovne
-postaje. Vse nadaljnje fino pozicioniranje, pregled tekočega traku in
-obdelava ploščic so opisani v poglavju 3.9.
-
-#### 3.1.5 Rumena in modra črta v navigacijskem toku
-
-Rumena črta je implementirana kot reaktivni varnostni sloj v vozlišču
-`yellow_line_avoider.py`. Vozlišče spremlja sliko zgornje kamere in v
-stanju `CLEAR` ne posega v navigacijo. Če rumeno črto zazna v nevarnem
-območju slike, preide v stanje `BACKING`, objavi hitrostne ukaze na
-`/cmd_vel_unstamped` in `/cmd_vel` ter robota za kratek čas umakne nazaj.
-S tem lahko začasno preglasi običajne ukaze patrulje ali Nav2.
-
-Po zaključku navigacije po prvi sobi `behavior_manager` robota pošlje na
-zaključno točko, nato pa omogoči vozlišče `blue_line_explorer.py` prek
-teme `/blue_line_enabled`. Takrat se stanje robota spremeni v
-`FOLLOW_BLUE_LINE`, nepotrebna zaznavna vozlišča se ustavijo, nadzor nad
-gibanjem pa prevzame vizualno sledenje modri črti. `blue_line_explorer`
-objavlja ukaze na `/cmd_vel_unstamped` in stanje/debug informacije na
-`/blue_line/status` ter `/blue_line/debug_image`.
-
-S tem je navigacija v implementaciji razdeljena na tri povezane dele:
-Nav2 za globalne premike po karti, `behavior_manager` za preklapljanje
-med fazami in namenski reaktivni moduli za posebna pravila gibanja
-(rumena in modra črta).
-
-### 3.3 Zaznavanje obrazov
-
-`FaceRecognizer` se naroči na temo
-`/``oakd``/``rgb``/``preview``/``image_raw`. Detekcija poteka pri 2 Hz
-(omejitev CPE). Za vsak zaznan obraz:
-
-1.  `face_recognition.face_locations``()` določi položaje obrazov v
-    sliki (HOG detektor),
-2.  `face_recognition.face_encodings``()` izračuna 128-dimenzionalni
-    enkoder,
-3.  Caffe gender model klasificira spol iz izrezanega območja obraza,
-4.  Evklidska razdalja do referenčnih enkoderjev znanih oseb določi
-    identiteto,
-5.  Rezultat (ime, vloga, spol, zaupanje) se objavi na
-    `/``recognized_person`.
-
-`FaceLocalizator` grupira zaznave v oblake (cluster radius 0,6 m) in s
-TF2 pretvori položaj v map frame. Obraz je potrjen po ≥5 zaznav.
-
-### 3.4 Zaznavanje sodov
-
-`CylinderLocalizator` sprejema segmentacije iz
-`/``detected_cylinder_locations` (že v map frame). Za vsako zaznavo:
-
-1.  Preveri razdaljo do vseh obstoječih grozdov,
-2.  Doda točko obstoječemu grozdu ali ustvari novega,
-3.  Po ≥10 zaznav grozd potrdi in objavi vizualizacijski marker v RViz2,
-4.  **Barvna klasifikacija**: mediana RGB vrednosti pikslov → pretvorba
-    v HSV → klasifikacija v enega od 8 barvnih razredov,
-5.  **Orientacija**: glasovanje po analizi oblike točkovnega oblaka
-    (pokončen/ležeč),
-6.  `BarrelInspector` sproži `/``spill_check` servis po potrditvi.
-
 ### 3.5 Zaznavanje poškodb ploščic
 
 `TileClassifier` se naroči na sliko armne kamere. Za vsako sliko:
@@ -991,9 +936,8 @@ TF2 pretvori položaj v map frame. Obraz je potrjen po ≥5 zaznav.
     (μ=\[0.485, 0.456, 0.406\], σ=\[0.229, 0.224, 0.225\]),
 3.  U-Net inferenca (segmentation_models_pytorch, ResNet34 backbone),
 4.  Sigmoidna aktivacija + morfološka poobdelava,
-5.  Poškodba zaznana, če razmerje poškodovanih pikselov \> 0,2 %;
-    rezultat objavi na `/``tile_defect`.
-
+5.  Poškodba je zaznana, če razmerje poškodovanih pikslov preseže 0,2 %;
+    rezultat se objavi na `/tile_defect`.
 
 ### 3.6 Implementacija sledenja modri črti
 
