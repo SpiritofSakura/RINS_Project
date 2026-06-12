@@ -1,7 +1,7 @@
 # Končno poročilo: RInS
 
 **Ekipa:** Zeta
-**Člani:** Lara Mehle,
+**Člani:** Lara Mehle, Tristan Flander, Tjaš Jelen
 
 ------------------------------------------------------------------------
 
@@ -481,7 +481,7 @@ prepreči zadnji korak čez prepovedano rumeno črto.
 ### 2.7 Zaznavanje poškodb ploščic
 
 Za zaznavanje poškodb na ploščicah delovnih postaj smo trenirali
-**U-Net** segmentacijski model \[4\]. U-Net je konvolucijska nevronska
+**U-Net** segmentacijski model. U-Net je konvolucijska nevronska
 mreža z arhitekturo enkoder-dekoder in preskočnimi povezavami (skip
 connections), ki ji omogočajo natančno segmentacijo na ravni pikslov.
 
@@ -582,7 +582,7 @@ zabeležijo v končno poročilo.
 ### 2.10 Generiranje poročila
 
 Generiranje inšpekcijskega poročila je osrednji zaključni proces celotne
-misije, ki se sproži ob srečanju s tehničnim direktorjem (CEO) v drugi
+misije, ki se sproži ob srečanju s tehničnim direktorjem (CTO) v drugi
 sobi. Celoten sistem zbiranja podatkov in proženja poročila je odvisen od
 **QR čitalca** -- brez njegovega delovanja nobena naloga ni aktivirana in
 poročilo ne more biti generirano.
