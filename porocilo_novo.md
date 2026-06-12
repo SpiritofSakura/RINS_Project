@@ -929,15 +929,54 @@ Rezina se objavi na `/slice_points` za vizualno preverjanje v RViz2. Rezultat se
 
 ### 3.5 Zaznavanje poškodb ploščic
 
-`TileClassifier` se naroči na sliko armne kamere. Za vsako sliko:
+Sistem za zaznavanje poškodb ploščic temelji na U-Net segmentacijskem modelu, ki je bil posebej treniran za klasifikacijo površinskih razpok in strukturnih poškodb na dveh težavnostnih nivojih. Sistem obsega treniranje modela, evalvacijo in izbiro praga ter inferenčno vozlišče v ROS 2.
 
-1.  CLAHE predprocesiranje (clip_limit=4, tile_grid=8×8),
-2.  Skaliranje na 512×512 in normalizacija z ImageNet parametri
-    (μ=\[0.485, 0.456, 0.406\], σ=\[0.229, 0.224, 0.225\]),
-3.  U-Net inferenca (segmentation_models_pytorch, ResNet34 backbone),
-4.  Sigmoidna aktivacija + morfološka poobdelava,
-5.  Poškodba je zaznana, če razmerje poškodovanih pikslov preseže 0,2 %;
-    rezultat se objavi na `/tile_defect`.
+---
+
+#### 3.5.1 Treniranje modela (unet_train.py)
+
+Model je arhitekture **U-Net** z enkodirjem ResNet-34, predhodno naučenim na ImageNet (`segmentation_models_pytorch`). Vhod je RGB slika 512×512 px, izhod je binarna segmentacijska maska poškodbe.
+
+**Podatkovni nabor:**
+
+Slike so organizirane v tri razrede poškodb (`damaged_0`, `damaged_1`, `damaged_3`) ter razred nepoškodovanih ploščic (`okay_*`). Nabor se stratificirano razdeli v učno (80 %) in validacijsko (20 %) množico, da se ohrani razmerje med razredi v obeh delih.
+
+**Predprocesiranje in augmentacije:**
+
+Vsaka slika se predhodno obdela s **CLAHE** (clip_limit=4, tile_grid=8×8) za izboljšanje lokalnega kontrasta, nato normalizira z ImageNet parametri (μ=[0.485, 0.456, 0.406], σ=[0.229, 0.224, 0.225]). Med treningom se izvajajo naslednje augmentacije: horizontalni in vertikalni zrcalni odsev, rotacija za 90°, elastična transformacija, distorzija mreže, naključna sprememba svetlosti in kontrasta ter Gaussov šum.
+
+**Funkcija izgube:**
+
+Skupna izguba je kombinacija treh členov: `0.35 × BCE + 0.35 × Tversky + 0.3 × ClDice`. Tversky izguba (α=0.2, β=0.8) kaznuje napačno klasificirane poškodovane piksle bolj kot lažne pozitivne. **ClDice** (Centerline Dice) je posebna izguba, ki kaznuje missing skelete in konice razpok ter izboljša zveznost segmentiranih linij. BCE utež za pozitivne piksle (`pos_weight`) se izračuna iz razmerja negativnih in pozitivnih pikslov v učni množici (omejena na 10), kar kompenzira razredno neravnovesje.
+
+**Optimizacija:**
+
+Optimizer: Adam (`lr=1e-4`). Urnik: CosineAnnealingLR (`T_max=50`). Zgodnje ustavljanje po 10 epohah brez izboljšanja validacijskega Dice koeficienta. Najboljši model se shrani v `results/unet/best_model.pth`.
+
+---
+
+#### 3.5.2 Evalvacija in izbira praga (unet_evaluate.py)
+
+Po treniranju skripta `unet_evaluate.py` izvede **pregled pragov** v razponu [0,20 ... 0,70] na testni množici. Za vsak prag se izračuna povprečni IoU čez vse razrede poškodb. Izbere se prag z najboljšim skupnim povprečnim IoU.
+
+Za vsak tip poškodb se poroča: n slik, mean/median/min/max IoU. Po morfološki poobdelavi (odpiranje 3×3, zapiranje 5×5) se shranijo vizualizacijska primerjalna polja: originalna slika | napoved (modra) | referenčna maska (zelena).
+
+---
+
+#### 3.5.3 Inferenca v realnem času (TileClassifier)
+
+**TileClassifier** (`tile_classifier.py`) je ROS 2 vozlišče, ki se naroči na `/tile_warped` — perspektivno korigirane slike ploščic, ki jih pošilja `tile_detect` med inšpekcijo (opisano v 3.9.4).
+
+**Postopek klasifikacije za vsako ploščico:**
+
+1. BGR slika se pretvori v RGB in obdela s transformacijami: CLAHE → resize 512×512 → normalizacija z ImageNet parametri.
+2. U-Net inferenca na GPU/CPU z onemogočenim gradientom.
+3. Sigmoidna aktivacija vrne verjetnostno masko.
+4. Maska se binarizira s pragom **0,20** (`THRESHOLD`) in morfološko poobdela (odpiranje 3×3, zapiranje 5×5).
+5. Izračuna se razmerje poškodovanih pikslov. Ploščica je klasificirana kot **`DEFECT`**, če je razmerje ≥ 0,2 % (`MIN_DEFECT_RATIO = 0.002`), sicer **`OK`**.
+6. Rezultat se objavi na `/tile_classification` v obliki `"DEFECT:tile_id"` oziroma `"OK:tile_id"`, kjer je `tile_id` zaporedna številka ploščice.
+7. Na `/tile_heatmap` se objavi vizualizacija: verjetnostna mapa JET barvne palete, preložena čez originalno sliko ploščice (50/50).
+
 
 ### 3.6 Implementacija sledenja modri črti
 
