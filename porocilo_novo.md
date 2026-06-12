@@ -1914,9 +1914,9 @@ trije pogoji iz 3.8.2).
 
 ------------------------------------------------------------------------
 
-### 3.10 Generiranje poročila
+### 3.9 Generiranje poročila
 
-#### 3.10.1 QR čitalec (`qr_reader.py`)
+#### 3.9.1 QR čitalec (`qr_reader.py`)
 
 QR čitalec je vstopna točka za celoten poročilni sistem -- brez njega
 nobena naloga ni aktivirana. Vozlišče se naroči na OAK-D kamero
@@ -1974,7 +1974,7 @@ vozlišče, ki se ohrani, je `report_manager`.
 
 ---
 
-#### 3.10.2 Poročilni upravljalnik (`report.py`)
+#### 3.9.2 Poročilni upravljalnik (`report.py`)
 
 `ReportManager` je centralno vozlišče, ki teče od začetka do konca
 misije in zbira vse inšpekcijske podatke. Naročen je na 11 tem:
@@ -2058,7 +2058,7 @@ ali sta sliki medtem prispeli, in ju shrani, ko sta na voljo.
 
 ---
 
-#### 3.10.3 Generiranje poročila
+#### 3.9.3 Generiranje poročila
 
 Generiranje se sproži s sporočilom `"make"` na `/report_commands` (pošlje
 ga QR čitalec ob zaznavi "report" kode). Podprt je tudi ukaz `"clear"`,
@@ -2179,5 +2179,5 @@ lokalizacije.
 
 ## 7. Aneks
 
-*\[Priložite generirano inšpekcijsko poročilo.\]*
+Na naslednji strani se začne poročilo, ki ga je zgeneriral robot.
 
