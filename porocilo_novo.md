@@ -555,6 +555,128 @@ stran od traku in se odpelje na varno razdaljo, s čimer zapusti
 delovno območje. Inspekcija se zaključi, rezultati klasifikacije pa se
 zabeležijo v končno poročilo.
 
+### 2.10 Generiranje poročila
+
+Generiranje inšpekcijskega poročila je osrednji zaključni proces celotne
+misije, ki se sproži ob srečanju s tehničnim direktorjem (CEO) v drugi
+sobi. Celoten sistem zbiranja podatkov in proženja poročila je odvisen od
+**QR čitalca** -- brez njegovega delovanja nobena naloga ni aktivirana in
+poročilo ne more biti generirano.
+
+---
+
+#### 2.10.1 QR čitalec kot centralni prožilec
+
+QR čitalec (`qr_reader`) je vozlišče, ki teče neprekinjeno od začetka
+misije in deluje v dveh načinih, ki se preklapljata glede na stanje
+robota:
+
+- **Način "face"**: aktiven, ko se robot približuje osebi ali z njo
+  komunicira. V tem načinu QR čitalec bere navodila z delavčeve QR kode
+  (npr. preštevanje obročev, inšpekcija sodov ali preverba anomalij na
+  določeni postaji) in jih posreduje sistemu. Poleg tega ob zaznavi
+  osebe prek prepoznave obraza objavi njeno identiteto, kar omogoča
+  beleženje, kdo je zahteval posamezno nalogo.
+
+- **Način "blue\_line"**: aktiven med sledenjem modri črti v drugi sobi.
+  V tem načinu QR čitalec neprekinjeno pregleduje vse QR kode ob poti
+  in čaka na tisto, ki vsebuje ključno besedo "report" -- to je koda
+  tehničnega direktorja, ki sproži generiranje končnega poročila.
+
+Za dekodiranje QR kod se uporablja kombinacija WeChat QR detektorja (za
+majhne in poškodovane kode) in OpenCV `QRCodeDetector` z več strategijami
+predprocesiranja (CLAHE izenačevanje histograma, Otsu binarizacija), kar
+zagotavlja robustno branje v različnih svetlobnih pogojih.
+
+---
+
+#### 2.10.2 Zbiranje podatkov med misijo
+
+**Poročilni upravljalnik** (`report_manager`) je vozlišče, ki teče
+vzporedno z vsemi drugimi komponentami in skozi celotno misijo zbira
+podatke iz številnih virov. Ne izvaja lastnega procesiranja, temveč deluje
+kot centralno skladišče, v katerega druga vozlišča pošiljajo rezultate
+svojega dela:
+
+- **Štetje obročev**: vozlišče za lokalizacijo obročev objavlja potrjene
+  lokacije obročev skupaj z njihovo barvo. Poročilni upravljalnik šteje
+  obroče po barvnih razredih (rdeča, zelena, modra, rumena, oranžna) in
+  si zapomni skupno število.
+
+- **Inšpekcija sodov**: informacije prihajajo iz dveh virov:
+  1. Lokalizator cilindrov sporoča barvo in orientacijo vsakega
+     potrjenega soda (pokončen ali ležeč).
+  2. Inšpektor sodov po opravljeni analizi razlitja za vsak sod sporoči,
+     ali je bilo zaznano razlitje.
+  Oba podatka se združita v evidenco z ID-jem soda, barvo, orientacijo
+  in statusom razlitja.
+
+- **Zaznavanje anomalij na ploščicah**: to je najkompleksnejši podatkovni
+  tok:
+  1. Inšpektor postaje sporoči, katero postajo trenutno pregleduje
+     (rdečo ali zeleno).
+  2. Detektor ploščic sporoči vsako novo zaznano ploščico in obenem
+     objavi njeno perspektivno korigirano sliko.
+  3. Klasifikator za vsako ploščico vrne rezultat ("OK" ali "DEFECT")
+     ter prikaz napake v obliki toplotne karte (heatmap).
+  4. Poročilni upravljalnik vse to shrani po postajah in ploščicah,
+     vključno s slikami defektnih ploščic in pripadajočimi toplotnimi
+     kartami.
+
+- **Identiteta naročnika**: poleg samega štetja in inšpekcije sistem
+  beleži tudi, kdo je posamezno nalogo zahteval. To poteka v dveh
+  korakih: najprej QR čitalec ob približevanju obrazu sporoči začetek
+  novega kroga, nato pa ob prepoznavi osebe objavi njeno ime, ki se
+  pripiše vsem nalogam, zahtevanim v tem krogu.
+
+Pomembno je, da se naloge aktivirajo **izključno prek QR kod**.
+Brez prebrane QR kode z navodilom (npr. "rings", "barrels", "defects
+red") poročilni upravljalnik sicer beleži podatke, vendar v končnem
+poročilu za to nalogo izpiše "Task not requested". To velja za vse tri
+tipe nalog.
+
+---
+
+#### 2.10.3 Generiranje in zgradba poročila
+
+Ko robot v načinu sledenja modri črti prebere QR kodo s ključno besedo
+"report", se sproži generiranje poročila:
+
+1. **Generiranje PDF in Markdown**: poročilni upravljalnik iz vseh
+   zbranih podatkov sestavi strukturiran dokument v dveh formatih --
+   PDF (za uradno oddajo) in Markdown (za morebitno nadaljnjo obdelavo).
+
+2. **Zgradba poročila** vključuje tri sekcije:
+
+   - **Ring Counting**: skupno število zaznanih obročev, razčlenjeno po
+     barvah, z navedbo osebe, ki je nalogo zahtevala. Če naloga ni bila
+     zahtevana, se to izrecno zapiše.
+
+   - **Barrel Inspection**: tabela vseh pregledanih sodov s stolpci ID,
+     barva, orientacija (pokončen/ležeč) in zaznano razlitje (da/ne/?).
+     Za sede z razlitjem se v poročilo vključijo tudi slikovni dokazi
+     razlitja.
+
+   - **Anomaly Detection**: za vsako pregledano delovno postajo posebej
+     (rdečo/zeleno) se izpišejo: skupno število pregledanih ploščic,
+     število brezhibnih in število defektnih. Sledi tabela s statusom
+     vsake ploščice. Za defektne ploščice se v poročilo vstavijo pari
+     slik: originalna warpana slika ploščice in pripadajoča toplotna
+     karta (heatmap), ki prikazuje lokacijo in intenziteto poškodbe.
+     Tudi tu se zabeleži identiteta naročnika.
+
+3. **Avtomatsko ugašanje sistema**: 3 sekunde po proženju poročila QR
+   čitalec samodejno ugasne vsa delovna vozlišča (zaznavanje obrazov,
+   obročev, sodov, navigacijo, sledenje črti itd.). Edino vozlišče, ki
+   ostane aktivno, je prav poročilni upravljalnik -- s čimer se
+   zagotovi, da ima dovolj časa dokončati generiranje PDF dokumenta,
+   preden se celoten sistem ustavi.
+
+Izhodni datoteki se shranita v imenik `~/RINS_Project/reports/pdf/` z
+zaporednim številčenjem (`report00.pdf`, `report01.md` itd.), slike
+defektnih ploščic in razlitij pa v podimenike `img/defects/` in
+`img/barrels/`.
+
 ------------------------------------------------------------------------
 
 ## 3. Implementacija in integracija
@@ -1029,19 +1151,207 @@ trije pogoji iz 3.9.2).
 
 ------------------------------------------------------------------------
 
+### 3.10 Generiranje poročila
+
+#### 3.10.1 QR čitalec (`qr_reader.py`)
+
+QR čitalec je vstopna točka za celoten poročilni sistem -- brez njega
+nobena naloga ni aktivirana. Vozlišče se naroči na OAK-D kamero
+(`/oakd/rgb/preview/image_raw`), stanje robota (`/robot_state`) in
+prepoznane osebe (`/recognized_person`). Objavlja na temi `/qr` (navodila
+za naloge) in `/report_commands` (ukaz za generiranje poročila).
+
+**Načini delovanja** se preklapljajo avtomatsko glede na stanje robota:
+- `"face"` -- ko je robot v stanjih `APPROACH_FACE` ali `INTERACT_FACE`,
+- `"blue_line"` -- ko je v stanjih sledenja modri črti (`FOLLOW_BLUE_LINE`,
+  `LINE_FOLLOWING`, `BLUE_LINE_SEARCH`, `BLUE_LINE_FOLLOW`,
+  `BLUE_LINE_DEAD_END`),
+- `"off"` -- v vseh ostalih stanjih (QR čitalec ne procesira slik).
+
+**Dekodiranje QR kod** uporablja kaskado detektorjev z naraščajočo
+robustnostjo (in padajočo hitrostjo):
+1. WeChat QR detektor (`cv2.wechat_qrcode_WeChatQRCode`) -- primeren za
+   majhne, poškodovane ali slabo osvetljene kode.
+2. OpenCV `QRCodeDetector.detectAndDecodeMulti` na originalni sivi sliki.
+3. `QRCodeDetector.detectAndDecode` (posamezna koda).
+4. CLAHE izenačevanje histograma (`clipLimit=3.0, tileGridSize=8x8`) +
+   ponovitev korakov 2 in 3.
+5. Otsu binarizacija (`cv2.THRESH_BINARY + cv2.THRESH_OTSU`) + ponovitev
+   korakov 2 in 3.
+
+**Obdelava vsebine QR kode** je odvisna od načina:
+- V *face* načinu: `_check_defects()` prepozna ključne besede v
+  prebranem nizu. Če vsebuje `"barrel"`, objavi `"barrels"` na `/qr`;
+  če `"ring"`, objavi `"rings"`; če `"defect"` ali `"anomaly"`, objavi
+  `"defects red"` ali `"defects green"` (privzeto zelena, razen če niz
+  vsebuje `"red"`). Če vsebuje `"report"`, objavi `"make"` na
+  `/report_commands`.
+
+- V *blue_line* načinu: `_check_blue_line_qr()` reagira le na kode, ki
+  vsebujejo `"report"` -- te sprožijo generiranje poročila prek
+  `/report_commands` ("make") in nastavijo 3-sekundni odštevalnik za
+  ugašanje sistema. Vse ostale QR kode v tem načinu se ignorirajo
+  (beležijo se v log, vendar ne sprožijo akcij). Vsaka koda se obdela
+  le enkrat (`_seen_blue_qr` množica).
+
+**Objava identitete osebe**: v face načinu QR čitalec posluša
+`/recognized_person`. Ko prejme JSON z imenom osebe, ga objavi na `/qr`
+kot `"person <ime>"` -- vendar le enkrat na osebo (dokler se ne zamenja).
+
+**Vizualizacija**: vsaka prebrana QR koda se prikaže v pojavnem oknu
+("QR Code Text") z zelenim okvirjem in izpisom vsebine. Vsaka unikatna
+koda se prikaže le enkrat (`_seen_popup_qr`).
+
+**Ugašanje sistema po poročilu**: `_check_report_finish()` se kliče na
+0,2 s. Ko preteče 3 s od zaznave "report" QR kode, QR čitalec z ukazom
+`pkill -f <vzorec>` sistematično ugasne vsa delovna vozlišča (skupno 23
+vzorcev, vključno z zaznavanjem obrazov, obročev, sodov, navigacijo,
+sledenjem črti, orkestratorjem, inšpektorjem postaje ipd.). Edino
+vozlišče, ki se ohrani, je `report_manager`.
+
+---
+
+#### 3.10.2 Poročilni upravljalnik (`report.py`)
+
+`ReportManager` je centralno vozlišče, ki teče od začetka do konca
+misije in zbira vse inšpekcijske podatke. Naročen je na 11 tem:
+
+| Tema | Tip sporočila | Namen |
+|---|---|---|
+| `/detected_ring_locations` | `Marker` | Šteje potrjene obroče po barvah |
+| `/detected_cylinder_locations` | `Marker` | Beleži sode (ID, barva, orientacija) |
+| `/barrel_inspection_result` | `String` (JSON) | Beleži rezultat preverbe razlitja |
+| `/qr` | `String` | Aktivira naloge in beleži naročnike |
+| `/recognized_person` | `String` (JSON) | Pomožni log prepoznanih oseb |
+| `/inspector_station` | `String` | Določa trenutno postajo ("red"/"green") |
+| `/tile_status` | `String` | Zaznava nove ploščice ("TILE_FOUND") |
+| `/tile_classification` | `String` | Rezultat klasifikacije ("OK" ali "DEFECT") |
+| `/tile_warped` | `Image` | Shrani warpano sliko ploščice |
+| `/tile_heatmap` | `Image` | Shrani toplotno karto poškodbe |
+| `/report_commands` | `String` | Proži generiranje ("make") ali brisanje ("clear") |
+
+**Beleženje naročnika naloge**: sistem sledi, katera oseba je zahtevala
+posamezno nalogo, prek mehanizma "krogov":
+1. Ob prejemu `"approaching face"` na `/qr` se začne nov krog
+   (`_round_requester = "Unknown"`, `_round_tasks = {}`).
+2. Vse naloge, aktivirane v tem krogu, se dodajo v `_round_tasks`.
+3. Ko prispe `"person <ime>"`, se ime shrani kot `_round_requester` in
+   pripiše vsem nalogam tega kroga.
+4. Če ime ne prispe (npr. oseba ni bila prepoznana), ostane naročnik
+   `"Unknown"`. Naloge za defekte imajo ločen slovar `_defect_requesters`
+   (ključ je barva postaje).
+
+**Aktivacija nalog** poteka izključno prek QR kod:
+- `"rings"` na `/qr` → `self.rings_requested = True`
+- `"barrels"` → `self.barrels_requested = True`
+- `"defects <barva>"` → doda barvo v `self.defect_stations`
+- Brez prejete aktivacije se v poročilu izpiše "Task not requested",
+  razen če je vključen parameter `noqr:=True` (debug način, ki vedno
+  prikaže vse sekcije).
+
+**Zbiranje podatkov o obročih** (`_ring_callback`):
+- Sprejema `Marker` z imenskim prostorom `"ring_confirmed"` ali
+  `"ring_actionable"`.
+- Iz `color.r/g/b` vrednosti markerja določi barvo (prek
+  `_marker_to_color()`, ki primerja RGB z 8 preddefiniranimi barvami).
+- Vsak marker se šteje le enkrat (preverba prek `_seen_ring_ids`).
+- Števci se hranijo v `self.ring_counts[barva]`.
+
+**Zbiranje podatkov o sodih** (`_barrel_callback`):
+- Sprejema `Marker` z imenskim prostorom `"barrel_confirmed"` ali
+  `"cylinder_confirmed"`.
+- Iz markerja prebere barvo (enako kot pri obročih), orientacijo iz
+  `marker.text` (`"horizontal"` ali `"vertical"`) in ID iz `marker.id`.
+- Vsak sod se doda le enkrat v seznam `self.barrel_data` (preverba po
+  `barrel_id`).
+
+**Rezultati razlitja** (`_barrel_result_callback`):
+- Prejme JSON z `barrel_id` in `leak_detected` (true/false).
+- Posodobi ustrezen vnos v `self.barrel_data`.
+
+**Zbiranje podatkov o ploščicah**:
+- `_station_callback`: ob prejemu `"red"` ali `"green"` na
+  `/inspector_station` nastavi `_current_station` in inicializira seznam
+  ploščic za to postajo, če še ne obstaja.
+- `_tile_status_callback`: ob `"TILE_FOUND"` doda nov vnos v seznam
+  trenutne postaje (`tiles_per_station[station]`) z ID-jem (zaporedna
+  številka), statusom `None` in praznima poljema za slike.
+- `_tile_classification_callback`: prejme niz oblike `"OK:<tile_id>"` ali
+  `"DEFECT:<tile_id>"`. Posodobi zadnjo ploščico v seznamu. Če je
+  rezultat `"DEFECT"`, shrani warpano sliko in heatmapo na disk:
+  - warpana slika: `img/defects/defect<XX>_<seq>_<station>.png`
+  - heatmapa: `img/defects/heatmap<XX>_<seq>_<station>.png`
+- `_tile_warped_callback` in `_tile_heatmap_callback`: shranjujeta slike
+  v predpomnilnik (`_warped_cache`, `_heatmap_cache`), indeksirane po
+  `header.frame_id` (ki ga `tile_detect` nastavi na zaporedno številko).
+  Predpomnilnika se trimata na zadnjih 20 vnosov.
+
+**Zakasnjeno shranjevanje slik** (`_pending_defect` mehanizem):
+Ker warpana slika in heatmapa lahko prispeta v poljubnem vrstnem redu
+glede na klasifikacijo, se ob DEFECT rezultatu preveri, ali sta obe
+sliki že v predpomnilniku. Če ne, se shranita v `_pending_defect` z
+2-sekundnim timeoutom -- `_check_defect_timeout` periodično preverja,
+ali sta sliki medtem prispeli, in ju shrani, ko sta na voljo.
+
+---
+
+#### 3.10.3 Generiranje poročila
+
+Generiranje se sproži s sporočilom `"make"` na `/report_commands` (pošlje
+ga QR čitalec ob zaznavi "report" kode). Podprt je tudi ukaz `"clear"`,
+ki izbriše vse prejšnje rezultate.
+
+**Postopek generiranja** (`_make_report`):
+1. Določi se ime poročila `report<XX>` (zaporedno številčenje, ki se
+   nadaljuje od zadnjega obstoječega PDF-ja v izhodnem imeniku).
+2. Ustvari se imenik `~/RINS_Project/reports/pdf/` in podimenika
+   `img/barrels/` in `img/defects/`.
+3. Poročilo se generira v dveh formatih: PDF (prek knjižnice `fpdf`) in
+   Markdown (`.md` datoteka).
+
+**PDF generiranje** (`_generate_pdf`):
+- Uporablja razred `InspectionPDF(FPDF)` z glavo (naslov) in nogo
+  (številka strani).
+- Dokument vsebuje tri sekcije (vsaka na svoji strani):
+
+1. **Ring Counting** -- prikaže se le, če je bila naloga aktivirana
+   (`self.rings_requested == True` ali če so bili obroči dejansko
+   zaznani). Vsebuje identiteto naročnika, skupno število obročev in
+   razčlenitev po barvah.
+
+2. **Barrel Inspection** -- vsebuje tabelo vseh sodov s stolpci Barrel
+   ID, Colour, Orientation, Leak detected. Sledijo slike razlitij iz
+   `img/barrels/` (datoteke z vzorcem `leak_*.jpg`), postavljene v
+   mrežo 3×2 (3 slike na vrstico, vsaka širine 50 mm).
+
+3. **Anomaly Detection** -- za vsako postajo (rdečo/zeleno) posebej:
+   identiteta naročnika, statistika (skupaj/OK/DEFECT), tabela vseh
+   ploščic s statusom. Za defektne ploščice se v parih (texture +
+   heatmap) vstavijo slike velikosti 30 mm.
+
+**Markdown generiranje** (`_write_markdown`):
+- Vzporedno s PDF-jem se generira tudi Markdown datoteka z enako
+  strukturo, ki vključuje inline slike (poti do `.png` datotek).
+
+**Izhodni imenik**: `~/RINS_Project/reports/pdf/`. Vsak zagon ustvari
+datoteki `report<XX>.pdf` in `report<XX>.md`, kjer se `<XX>` samodejno
+povečuje.
+
+------------------------------------------------------------------------
+
 ## 4. Rezultati
 
 ### 4.1 Simulacija (Task 2)
 
-Na tekmovanju v simulaciji je robot uspešno: - zaznal in prepoznal
-**\[XX\] od \[XX\]** obrazov, - zaznal **\[XX\] od \[XX\]** obročev s
-pravilno barvo, - zaznal **\[XX\] od \[XX\]** sodov s pravilno barvo in
-orientacijo, - sledil modri črti do cilja: **\[da/ne\]**, - zaznal
-poškodbe na **\[XX\] od \[XX\]** ploščicah.
+Na tekmovanju v simulaciji je robot uspešno: 
+- zaznal in prepoznal **\[5\] od \[5\]** obrazov, 
+- zaznal **\[4\] od \[4\]** obročev s pravilno barvo, 
+- zaznal **\[8\] od \[8\]** sodov s pravilno barvo in orientacijo, pri čemer je en sod zaznal dvakrat,
+- zaznal **\[0\] od \[1\]** razlitija ležečih sodov,
+- uspešno sledil modri črti do cilja: **\[da\]**, 
+- pravilno zaznal (odstonost) poškodbe na **\[4\] od \[4\]** ploščicah.
 
-Skupno število točk: **\[XX\]**
-
-*\[TUKAJ DODAJ SLIKO ROBOTA V SIMULACIJI ALI RVIZ SCREENSHOT\]*
+V poglavju 7 se nahaja pdf poročilo, ki ga je po ocenjenem obhodu zgeneriral robot.
 
 ### 4.2 Pravi robot (Task 1R)
 
@@ -1061,11 +1371,15 @@ Video delujočega robota si lahko ogledate na naslednji povezavi: [video](https:
 
 ## 5. Razdelitev dela
 
-**\[IME ČLANA 1\]** (\~\[XX\]% dela): - *\[dopolni\]*
+**\[IME ČLANA 1\]** (\~ 1/3 dela): - *\[dopolni\]*
 
-**\[IME ČLANA 2\]** (\~\[XX\]% dela): - *\[dopolni\]*
+**\[Tristan Flander\]** (\~ 1/3 dela):
+- Generiranje inšpekcijskega poročila: implementacija vozlišča `report_manager`, vključno z zbiranjem podatkov iz vseh zaznavnih podsistemov, sledenjem identitete naročnikov ter generiranjem PDF in Markdown poročil z vdelanimi slikami.
+- Branje in parsanje QR kod: implementacija vozlišča `qr_reader`, vključno z rudarjenjem podatkov iz QR kod v dveh načinih (face in blue_line), dekodiranjem s kaskado WeChat in OpenCV detektorjev ter avtomatskim ugašanjem sistema po generiranju poročila.
+- Zaznavanje obročev v simulaciji: prva implementacija s HSV barvno segmentacijo in aproksimacijo kontur z elipsami; kasneje nadgrajena s z metodo Hougheve transformacije na disparitetni sliki.
+- Celoten inspekcijski tok delovnih postaj (razen klasifikatorja): implementacija vozlišč `station_inspector`, `tile_detect`, `workstation_recorder`, `line_localizator` in `orchestrator`, vključno s finim pozicioniranjem ob tekočem traku, detekcijo ploščic s perspektivno korekcijo ter orkestracijo inspekcijskih sekvenc.
 
-**Lara Mehle** (~[XX]% dela):
+**Lara Mehle** (~ 1/3 dela):
 
 - Zaznavanje in prepoznavanje obrazov: implementacija vozlišč `face_recognizer` in `face_localizator`, vključno z integracijo knjižnice face_recognition, Caffe modela za zaznavanje spola ter clustranjem zaznav v map frame.
 - Zaznavanje in lokalizacija sodov: implementacija vozlišč `cylinder_localizator` in `barrel_inspector`, vključno z barvno klasifikacijo po HSV, določanjem prostorske orientacije.
@@ -1089,10 +1403,11 @@ lokalizacije.
 - Zaznavanje obročev nam je povzročalo težave pri prvih dveh taskih. Prva implementacija v simulaciji je imela na določenih mapah veliko težav z zaznavanjem napačno pozitivnih obročev. Te probleme smo kasneje rešili z novim pristopom. Na pravem robotu (Task 1R) pa so bile težave še večje: različna osvetlitev, drugačna kamera (Gemini) in ozadje izven poligona so povzročali veliko lažnih zadetkov. Po večih preizkusih spreminjanja raznih pragov smo nazadnje pristopili k treniranju namenskega YOLO modela na sintetično generiranem učnem naboru, kar je bistveno izboljšalo robustnost.
 - Pri Task 2 smo imeli precej težav z zaznavanjem sodov: HSV segmentacija je bila občutljiva na osvetlitev, podobne barve okolja so povzročale lažne zadetke, določanje orientacije (pokončen/ležeč) pa je zahtevalo večkratno prilagajanje pragov.
 - Zaznavanje razlitja je bilo posebej zahtevno, saj je moral robot do vsakega ležečega soda posebej navigirati in se postaviti na ustrezno stran, da je kamera pokrivala tla ob sodu. To je pogosto povzročalo težave pri sodih, postavljenih ob ovirah ali v kotih prostora, kjer navigacijski sklad ni mogel najti ustrezne pristopne točke oziroma se robot ni mogel dovolj približati za zanesljivo detekcijo.
+- Ker smo uporabljali navigacijo do izbrane točke, ki smo jo dobili na vajah, smo imeli pogosto težave z nepredvidljivostjo gibanja robota, včasih je zaradi tega v testiranjih spregledal obraze ali obroče, in smo zato morali robustificirati detektorje. Morda bi bilo celo bolje če bi napisali svoj sistem za navigacijo.
 
 **Strojne težave:**
 
-- Simulacijsko okolje in celoten ROS 2 sklad zahtevata zmogljiv zelo računalnik. Razvoj je bil zato sploh v kasnejših fazah razvoja večinoma omejen na laboratorijske računalnike, ki pa jih je bilo na voljo premalo glede na število skupin, kar je oteževalo vzporedno delo in testiranje.
+- Na lastnih prenosnih računalnikih smo imeli stalne težave z RViz in Gazebo okoljem, nekateri člani pa sploh niso imeli dovolj zmogljivega prenosnika. Razvoj je bil zato, sploh v kasnejših fazah razvoja,večinoma omejen na laboratorijske računalnike, ki pa jih je bilo na voljo premalo glede na število skupin, kar je oteževalo vzporedno delo in testiranje.
 - Posebej zahtevna je bila implementacija na pravem robotu. Roboti so bili pogosto zasedeni, se niso polnili, ali pa sploh niso delovali pravilno (Lidar se ni prižgal ipd.). Vsakodnevne težave s strojno opremo so bistveno upočasnile razvoj in testiranje IRL rešitve ter zmanjšale čas, ki smo ga imeli na voljo za kalibracijo in odpravljanje napak.
 
 
