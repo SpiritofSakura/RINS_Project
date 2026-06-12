@@ -559,7 +559,9 @@ zabeležijo v končno poročilo.
 
 ## 3. Implementacija in integracija
 
-### 3.1 Pregled arhitekture
+### 3.0 Arhitektura in ROS2
+
+#### 3.0.1 Pregled arhitekture
 
 Sistem je implementiran kot sklop ROS 2 vozlišč v paketu `task1`.
 Vozlišča komunicirajo asinhrono prek tematik (topics), akcij (actions)
@@ -610,7 +612,7 @@ in servisov (services). Spodnja tabela povzema ključna vozlišča.
                                       celotnega sistema
   -----------------------------------------------------------------------
 
-### 3.2 Integracija v ROS 2
+#### 3.0.2 Integracija v ROS 2
 
 Vse komponente se zaženejo z `task1.launch.py`. Nav2 sklad se zažene
 ločeno z `localization.launch.py`. Vozlišča komunicirajo prek: -
