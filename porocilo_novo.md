@@ -409,12 +409,17 @@ Skupno število točk: **\[XX\]**
 
 ### 4.2 Pravi robot (Task 1R)
 
-Na fizičnem robotu TurtleBot4 je sistem uspešno demonstriral: -
-zaznavanje in prepoznavanje obrazov v realnih svetlobnih pogojih, -
-zaznavanje sodov z OAK-D kamero in klasifikacijo barve, - sledenje modri
-črti s kamero in LiDARjem, - zaznavanje poškodb ploščic z armno kamero.
+Task 1R je bila implementacija prve naloge (Task 1) na fizičnem robotu in je zahteval zgolj zaznavanje obrazov in zaznavanje ter lokalizacijo obročev.
 
-*\[TUKAJ DODAJ SLIKO PRAVEGA ROBOTA PRI DELU\]*
+**Kamera.** Pravi robot namesto OAK-D kamere uporablja kamero Gemini RGBD. Vsi moduli so bili posodobljeni za teme `/gemini/color/image_raw/compressed`, `/gemini/depth/image_raw` in `/gemini/depth/points`. Ker smo imeli veliko problemov z zakasnjenostjo kamere smo morali narediti optimizacije. Stisnjene (compressed) teme so zmanjšale obremenitev WiFi za približno 15-kratnik. Lokalizacija objektov v 3D prostoru ne temelji na oblaku točk, temveč na back-projekciji prek intrinzičnih parametrov kamere (fx, fy, cx, cy), ki jih vozlišče samodejno prebere iz teme `/gemini/color/camera_info`.
+
+**Zaznavanje obrazov.** Namesto Haar detektorja je bil na pravem robotu uporabljen specializiran model YOLOv8n (`yolov8n-face-lindevs.pt`), ki teče na GPU. Ker je prvotni detektor zaznaval osebe za ograjo (zunaj dovoljene cone), je bilo zaznavanje omejeno s parametroma `face_crop_top=0.30` in `face_crop_bottom=0.70` — sprejemajo se le obrazi v srednji tretjini slike. Dodana je bila preveritev uniformnosti globine znotraj bounding boxa (`FACE_DEPTH_STD_MAX = 0.20 m`): ker so bili obrazi nalepljene fotografije na ograji, je nizek standardni odklon globine potrdil ravno površino; visok odklon je detekcijo zavrnil. Zaznani obrazi se lokalizirajo s povprečno globino zaplate (20×20 px) in pinhole-projekcijo v 3D.
+
+**Zaznavanje obročev.** Pri pravem robotu smo imeli kar nekaj težav z zaznavanjem obročev z implementacijo, ki je bila uporabljena na simulaciji. Zato smo natrenirali namenski model YOLOv8n za detekcijo obročev (`detect_rings_yolo.py`, model `~/ring_yolo/ring_det/weights/best.pt`). Učni nabor je bil generiran sintetično z orodjem `generate_ring_data.py`, ki je ustvarilo 3000 učnih in 600 validacijskih slik barvnih obročev (rdeča, zelena, modra, črna) na raznovrstnih ozadjih, skupaj z negativnimi primeri (zapolnjeni diski, sence, krožne oznake). Model je bil natreniran na 100 epohah z zgodnjim ustavljanjem (patience=20), velikost slike 416×416, na GPU.
+
+Zadetki so bili potrjeni z dvema zaporednima okvirjema (`yolo_confirm_frames=2`) ter z globinskim testom votlosti (sredina obroča mora biti dlje kot rob). Kot varnostna mreža je bil vgrajen HSV-ellipse fallback detektor (`enable_colour_fallback=true`), ki je prevzel zaznavanje kadar YOLO ni zaznal očitnih barvnih obročev; ta zahteva 4 zaporedne potrditve (`colour_confirm_frames=4`).
+
+Video delujočega robota si lahko ogledate na naslednji povezavi: [video](https://drive.google.com/drive/u/2/folders/1jx3x7DrQdfkEWfhQyGNvGYe20SZP5GIW)
 
 ------------------------------------------------------------------------
 
@@ -424,20 +429,13 @@ zaznavanje sodov z OAK-D kamero in klasifikacijo barve, - sledenje modri
 
 **\[IME ČLANA 2\]** (\~\[XX\]% dela): - *\[dopolni\]*
 
-**Lara Mehle** (\~\[XX\]% dela): - Implementacija zaznavanja in
-prepoznavanja obrazov: vozlišči `face_recognizer` in `face_localizator`,
-vključno z integracijo knjižnice face_recognition, Caffe gender modela
-in grozdevanjem v map frame. - Implementacija zaznavanja in lokalizacije
-sodov/valjev: vozlišči `cylinder_localizator` in `barrel_inspector`,
-vključno z barvno klasifikacijo po HSV, določanjem orientacije in
-zaznavanjem razlitja. - Razvoj in treniranje U-Net modela za zaznavanje
-poškodb ploščic: skripta `unet_train.py` in `unet_evaluate.py`,
-integracija v vozlišče `tile_classifier` za realnočasno delovanje v ROS
-2. - Izhodišče implementacije zaznavanja obročev (osnovna arhitektura
-rešitve, ki je bila kasneje nadgrajena s strani ekipe). - Implementacija
-sistema na pravem robotu (Task 1R): prilagoditev zaznavanja obrazov,
-sodov in poškodb ploščic za fizični hardware, kalibracija in testiranje
-na realnem robotu.
+**Lara Mehle** (~[XX]% dela):
+
+- Zaznavanje in prepoznavanje obrazov: implementacija vozlišč `face_recognizer` in `face_localizator`, vključno z integracijo knjižnice face_recognition, Caffe modela za zaznavanje spola ter clustranjem zaznav v map frame.
+- Zaznavanje in lokalizacija sodov: implementacija vozlišč `cylinder_localizator` in `barrel_inspector`, vključno z barvno klasifikacijo po HSV, določanjem prostorske orientacije.
+- Zaznavanje poškodb ploščic: razvoj in treniranje U-Net modela (skripta `unet_train.py` in `unet_evaluate.py`) ter integracija v vozlišče `tile_classifier` za delovanje v realnem času v ROS 2.
+- Izhodišče implementacije zaznavanja obročev: osnovna arhitektura rešitve, ki je bila kasneje nadgrajena s strani ekipe.
+- Implementacija sistema na pravem robotu (Task 1R): prilagoditev zaznavanja obrazov in obročev za fizični hardware, kalibracija ter testiranje na realnem robotu.
 
 ------------------------------------------------------------------------
 
@@ -450,20 +448,18 @@ vseh zaznav v globalnem koordinatnem sistemu, kar je zagotovilo
 robustnost kljub šumnim senzoričnim vhodom in nenatančnostim
 lokalizacije.
 
-**Programske težave:** - Zaznavanje obročev je bilo najzahtevnejša
-komponenta: Hougheva transformacija je bila občutljiva na svetlobne
-pogoje in ozadje v simulatorju. - Usklajevanje zaznavanja z navigacijo
-je povzročalo občasne tekmovalne pogoje (race conditions) pri hitrih
-zaporednih detekcijah. - *\[DOPOLNI Z OSTALIMI TEŽAVAMI\]*
+**Programske težave:**
 
-**Strojne težave:** - Omejena računska moč TurtleBot4 je upočasnila
-inferenco U-Net modela; na pravem robotu smo zmanjšali frekvenco
-zaznavanja. - OAK-D kamera ima omejeno vidno polje pri majhnih
-razdaljah, kar je oteževalo zaznavanje bližnjih objektov. - *\[DOPOLNI Z
-OSTALIMI TEŽAVAMI\]*
+- Zaznavanje obročev nam je povzročalo težave pri prvih dveh taskih. Prva implementacija v simulaciji je imela na določenih mapah veliko težav z zaznavanjem napačno pozitivnih obročev. Te probleme smo kasneje rešili z novim pristopom. Na pravem robotu (Task 1R) pa so bile težave še večje: različna osvetlitev, drugačna kamera (Gemini) in ozadje izven poligona so povzročali veliko lažnih zadetkov. Po večih preizkusih spreminjanja raznih pragov smo nazadnje pristopili k treniranju namenskega YOLO modela na sintetično generiranem učnem naboru, kar je bistveno izboljšalo robustnost.
+- Pri Task 2 smo imeli precej težav z zaznavanjem sodov: HSV segmentacija je bila občutljiva na osvetlitev, podobne barve okolja so povzročale lažne zadetke, določanje orientacije (pokončen/ležeč) pa je zahtevalo večkratno prilagajanje pragov.
+- Zaznavanje razlitja je bilo posebej zahtevno, saj je moral robot do vsakega ležečega soda posebej navigirati in se postaviti na ustrezno stran, da je kamera pokrivala tla ob sodu. To je pogosto povzročalo težave pri sodih, postavljenih ob ovirah ali v kotih prostora, kjer navigacijski sklad ni mogel najti ustrezne pristopne točke oziroma se robot ni mogel dovolj približati za zanesljivo detekcijo.
 
-Sistem je bil uspešno demonstriran na tekmovanju in dosegel **\[XX\]
-točk**.
+**Strojne težave:**
+
+- Simulacijsko okolje in celoten ROS 2 sklad zahtevata zmogljiv zelo računalnik. Razvoj je bil zato sploh v kasnejših fazah razvoja večinoma omejen na laboratorijske računalnike, ki pa jih je bilo na voljo premalo glede na število skupin, kar je oteževalo vzporedno delo in testiranje.
+- Posebej zahtevna je bila implementacija na pravem robotu. Roboti so bili pogosto zasedeni, se niso polnili, ali pa sploh niso delovali pravilno (Lidar se ni prižgal ipd.). Vsakodnevne težave s strojno opremo so bistveno upočasnile razvoj in testiranje IRL rešitve ter zmanjšale čas, ki smo ga imeli na voljo za kalibracijo in odpravljanje napak.
+
+
 
 ------------------------------------------------------------------------
 
@@ -471,15 +467,3 @@ točk**.
 
 *\[Priložite generirano inšpekcijsko poročilo.\]*
 
-------------------------------------------------------------------------
-
-## Viri
-
-\[1\] Macenski, S. et al., "Navigation2: The Next Generation Navigation
-System for ROS", *IEEE IROS 2020*.\
-\[2\] Geitgey, A., "face_recognition",
-https://github.com/ageitgey/face_recognition\
-\[3\] Levi, G. and Hassner, T., "Age and Gender Classification Using
-Convolutional Neural Networks", *CVPR 2015*.\
-\[4\] Ronneberger, O., Fischer, P., and Brox, T., "U-Net: Convolutional
-Networks for Biomedical Image Segmentation", *MICCAI 2015*.
