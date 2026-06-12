@@ -246,9 +246,11 @@ tlemi** --- to je višinski pas, v katerem bi bila vidna razlita
 tekočina. Razlitje je zaznano, če ta rezina vsebuje vsaj 4000 točk.
 Izsek rezine se za vizualno preverjanje objavi tudi v RViz2.
 
-### 2.5 Zaznavanje barvnih linij
+### 2.5 Sledenje modri črti
+-- tjas
 
-### 2.6 Sledenje modri črti
+### 2.6 Izogibanje rumeni črti
+-- tjas
 
 ### 2.7 Zaznavanje poškodb ploščic
 
@@ -274,6 +276,9 @@ okvirjem kamere in map frame, - **grozdevanja** (clustering)
 ponavljajočih se zaznav z mediano koordinat za odpornost na osamelce, -
 **pragov potrditve**: objekt je potrjen šele po minimalnem številu
 zaznav (obrazi: ≥5, obroči: ≥6, sodi: ≥10).
+
+### 2.9 Inšpektor ploščic
+-- tristan
 
 ------------------------------------------------------------------------
 
