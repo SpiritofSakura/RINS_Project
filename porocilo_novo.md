@@ -123,7 +123,7 @@ izvedbe naloge, vizualizacijo v RViz ter splošni vtis delovanja.
 
 Za doseganje optimalnega delovanja in izpolnjevanje vseh zahtev smo
 razvili celovit nabor algoritmov, ki vključuje navigacijo, zaznavanje
-objektov, prepoznavanje, inšpekcijo in govorni dialog. V nadaljevanju so
+objektov, prepoznavanje in inšpekcijo. V nadaljevanju so
 podrobno predstavljene posamezne tehnične rešitve.
 
 ### 2.1 Navigacija
@@ -2134,7 +2134,7 @@ Video delujočega robota si lahko ogledate na naslednji povezavi: [video](https:
 
 ## 5. Razdelitev dela
 
-**Tjaš Jelen** (\~ 1/3 dela):
+**Tjaš Jelen** (~ 1/3 dela):
 
 - Celotna navigacija robota in state flow za Task 2: zasnova ter implementacija navigacijskega toka z vozliščema `waypoint_navigator` in `behavior_manager`, vključno s fazami `IDLE`, `PATROL`, `APPROACH_FACE`, `INTERACT_FACE`, `APPROACH_BARREL`, `INTERACT_BARREL`, `APPROACH_WORKSTATION`, `FINISHING_ROUNDS` in `FOLLOW_BLUE_LINE`. Navigacijski tok zajema waypoint patruljo, začasne cilje za obraze in ležeče sode, nadaljevanje patrulje po interakcijah, prehod do delovne postaje, zaključno točko ter preklop v sledenje modri črti.
 - Sledenje modri črti: implementacija vozlišča `blue_line_explorer`, vključno z zaznavanjem modre črte v sliki, izbiro smeri na razcepih, obnovitvijo poti, objavljanjem hitrostnih ukazov in integracijo z navigacijskim stanjem `FOLLOW_BLUE_LINE`.
@@ -2142,10 +2142,10 @@ Video delujočega robota si lahko ogledate na naslednji povezavi: [video](https:
 - Zaznavanje obročev na pravem robotu: priprava in učenje YOLO modela za detekcijo obročev na fizičnem robotu, vključno s sintetičnim učnim naborom, prilagoditvijo na Gemini kamero ter integracijo detektorja za realno okolje.
 - Priprava navigacijskih točk za Task 2: dodajanje in prilagajanje waypointov v konfiguraciji naloge, testiranje obhodov po mapi ter usklajevanje waypoint patrulje z zaznavnimi in inšpekcijskimi fazami sistema.
 
-**\[Tristan Flander\]** (\~ 1/3 dela):
+**Tristan Flander** (~ 1/3 dela):
 - Generiranje inšpekcijskega poročila: implementacija vozlišča `report_manager`, vključno z zbiranjem podatkov iz vseh zaznavnih podsistemov, sledenjem identitete naročnikov ter generiranjem PDF in Markdown poročil z vdelanimi slikami.
 - Branje in parsanje QR kod: implementacija vozlišča `qr_reader`, vključno z rudarjenjem podatkov iz QR kod v dveh načinih (face in blue_line), dekodiranjem s kaskado WeChat in OpenCV detektorjev ter avtomatskim ugašanjem sistema po generiranju poročila.
-- Zaznavanje obročev v simulaciji: prva implementacija s HSV barvno segmentacijo in aproksimacijo kontur z elipsami; kasneje nadgrajena s z metodo Hougheve transformacije na disparitetni sliki.
+- Zaznavanje obročev v simulaciji z metodo Hougheve transformacije na disparitetni sliki (nadgrajena verzija).
 - Celoten inspekcijski tok delovnih postaj (razen klasifikatorja): implementacija vozlišč `station_inspector`, `tile_detect`, `workstation_recorder`, `line_localizator` in `orchestrator`, vključno s finim pozicioniranjem ob tekočem traku, detekcijo ploščic s perspektivno korekcijo ter orkestracijo inspekcijskih sekvenc.
 
 **Lara Mehle** (~ 1/3 dela):
