@@ -129,22 +129,89 @@ podrobno predstavljene posamezne tehnične rešitve.
 ### 2.1 Navigacija
 
 Za avtonomno navigacijo smo uporabili navigacijski sklad **Nav2**, ki je
-standardni okvir za navigacijo v ROS 2. Nav2 temelji na algoritmu
-**AMCL** (Adaptive Monte Carlo Localisation) za verjetnostno
-lokalizacijo robota na vnaprej zgrajeni karti s pomočjo delcev (particle
-filter). Za globalno načrtovanje poti skrbi planer NavFn oziroma Smac,
-lokalni planer DWB (Dynamic Window Based controller) pa poskrbi za
-izogibanje dinamičnim oviram v realnem času.
+standardni okvir za ciljno navigacijo v ROS 2. Robot se lokalizira na
+vnaprej zgrajeni karti v koordinatnem sistemu `map` z uporabo AMCL,
+odometrije in laserskega skenerja. V konfiguraciji Nav2 globalno pot
+načrtuje `NavfnPlanner`, lokalno sledenje poti pa izvaja
+`RegulatedPurePursuitController`. Navigacijski cilji se pošiljajo prek
+akcije `NavigateToPose`, kjer je cilj podan kot poza v globalnem
+koordinatnem sistemu karte.
 
-Robot je sledil vnaprej definirani vrsti točk (waypoints), ki je
-zagotavljala sistematično in ponovljivo pokrivanje področja. Točke smo
-določili ročno z upoštevanjem oblike prostora tako, da je robot z
-minimalnim številom premikov pokrival čim večji del območja.
+Potek navigacije nadzira `behavior_manager`, samo zaporedje patrolnih
+točk pa izvaja `waypoint_navigator`. Navigacijo smo razdelili na
+naslednje faze.
 
-Ob zaznavi objekta zanimanja (obraz, obroč, sod) je robot prekinil
-patrol in se z Nav2 navigiral k zaznani lokaciji v globalnem
-koordinatnem sistemu karte (map frame). Po opravljeni interakciji se je
-navigacija samodejno nadaljevala z naslednje točke v vrsti.
+1. **Inicializacija in lokalizacija.** Pred začetkom avtonomnega gibanja
+   se zaženejo Nav2, AMCL in vozlišča paketa `task1`. Robot začne
+   pošiljati cilje šele, ko ima veljavno pozo iz `/amcl_pose`, saj so vsi
+   cilji in zaznani objekti obravnavani v koordinatnem sistemu `map`.
+
+2. **Patrulja po prvi sobi.** Osnovno raziskovanje prve sobe poteka po
+   vnaprej določenih točkah iz `config/waypoints.yaml`. Vsaka točka
+   vsebuje položaj `x`, `y`, orientacijo `yaw` in po potrebi premor
+   `pause`. Nekatere točke imajo enak položaj in različne orientacije, zato
+   robot na pomembnih mestih izvede pregled okolice v več smereh. Tako se
+   prostor pokrije ponovljivo, zaznavni algoritmi pa imajo dovolj časa za
+   zaznavanje oseb, obročev in cilindrov.
+
+3. **Navigacija do obrazov.** Ko je potrjena lokacija obraza, se patrulja
+   začasno ustavi. `behavior_manager` izračuna pristopno točko pred osebo
+   in pošlje začasni cilj prek `NavigateToPose`. Po prihodu robot izvede
+   interakcijo, cilj označi kot obdelan in nato nadaljuje patruljo z
+   naslednjo točko.
+
+4. **Obroči med patruljo.** Obroči se zaznavajo in lokalizirajo med
+   patruljiranjem. Ker za obroče ni potrebna posebna navigacijska poza,
+   robot praviloma ne prekine poti, temveč lokacijo in barvo obroča
+   zabeleži med nadaljevanjem patrulje.
+
+5. **Cilindri med patruljo.** Pokončni cilindri se ob zaznavi samo
+   zabeležijo v globalni karti. Če je zaznan ležeči cilinder, lahko
+   `behavior_manager` začasno ustavi patruljo in pošlje robota na varno
+   pristopno točko ob cilindru. Po obdelavi cilindra se navigacija vrne v
+   običajno patrolno zaporedje.
+
+6. **Varovanje pred rumeno črto v prvi sobi.** Med navigacijo po prvi sobi
+   se uporablja ločeno varovalo za rumeno črto. To ne zamenja Nav2
+   planiranja poti, ampak deluje kot varnostni sloj: kamera spremlja
+   rumeno oznako v bližini robota, ob nevarnem približanju pa robot ustavi
+   oziroma se umakne nazaj. Na ta način se ohrani osnovna waypoint
+   navigacija, hkrati pa robot ne nadaljuje čez prepovedano območje.
+
+7. **Prehod do delovne postaje.** Ko robot iz QR navodila ali stanja
+   naloge izve, da mora obiskati določeno delovno postajo, se po zaključku
+   patrulje pošlje Nav2 cilj do ustrezne pristopne poze. Ta faza opisuje
+   samo prihod do delovne postaje; natančna poravnava in pregled delovne
+   celice sta obravnavana v ločenem poglavju.
+
+8. **Prehod v drugo sobo in sledenje modri črti.** Po zaključku prvega
+   dela naloge robot preide na navigacijo v drugi sobi. Tam se ciljno
+   premikanje po karti zamenja z vizualnim vodenjem po modri črti, ki ga
+   izvaja `blue_line_explorer`. Vozlišče se vključi prek
+   `/blue_line_enabled`, išče modro črto, ji sledi in pri razcepih izbere
+   ustrezno smer. Če črto izgubi ali naleti na slepo ulico, preide v
+   obnovitveno fazo iskanja oziroma obračanja, dokler ponovno ne najde
+   poti.
+
+Trenutna faza robota se objavlja tudi kot stanje na temi `/robot_state`.
+To stanje uporabljajo posamezna vozlišča, da vedo, ali smejo poseči v
+gibanje robota. V stanju `IDLE` robot miruje in čaka na začetek naloge.
+V stanju `PATROL` je aktivna navigacija po waypointih. Ob pristopu k
+zaznanemu obrazu preide v `APPROACH_FACE`, med interakcijo pa v
+`INTERACT_FACE`. Pri cilindrih se za ležeče cilindre uporablja analogni
+prehod `APPROACH_BARREL` oziroma `INTERACT_BARREL`, medtem ko se pokončni
+cilindri samo zabeležijo. Pri prehodu proti delovni postaji se uporabi
+stanje `APPROACH_WORKSTATION`, vendar se nadaljnje stanje delovne celice
+obravnava v ločenem poglavju. Po koncu prvega dela se robot premakne v
+zaključno navigacijsko fazo `FINISHING_ROUNDS`, nato pa v `FOLLOW_BLUE_LINE`,
+kjer nadzor prevzame sledenje modri črti. Varovalo rumene črte ima pri
+tem ločeno interno stanje `CLEAR` oziroma `BACKING`, saj deluje kot
+varnostni sloj nad običajnimi hitrostnimi ukazi.
+
+S tem je glavna navigacija razdeljena na globalno premikanje po karti v
+prvi sobi, lokalne prekinitve zaradi pomembnih objektov in vizualno
+vodenje po modri črti v drugi sobi. Podrobnosti posameznih zaznavnih
+algoritmov in delovne postaje so opisane v ločenih razdelkih poročila.
 
 ### 2.2 Zaznavanje in prepoznavanje obrazov
 
@@ -247,10 +314,145 @@ tekočina. Razlitje je zaznano, če ta rezina vsebuje vsaj 4000 točk.
 Izsek rezine se za vizualno preverjanje objavi tudi v RViz2.
 
 ### 2.5 Sledenje modri črti
--- tjas
+
+Sledenje modri črti je namenjeno navigaciji robota v drugi sobi, kjer se
+robot ne premika več po vnaprej določenih Nav2 waypointih, temveč sledi
+talni oznaki. Funkcionalnost izvaja vozlišče `blue_line_explorer`, ki se
+vključi po zaključku prvega dela naloge oziroma po prejemu sporočila na
+temi `/blue_line_enabled`. Ko je omogočeno, vozlišče prevzame izdajanje
+hitrostnih ukazov na `/cmd_vel_unstamped` in objavlja stanje robota
+`FOLLOW_BLUE_LINE`.
+
+Glavni deli algoritma so:
+
+- **Zajem slike:** sistem uporablja zgornjo kamero
+  (`/top_camera/rgb/preview/image_raw`), ki gleda proti tlom in zato
+  omogoča zaznavanje modre črte neposredno pred robotom.
+
+- **Barvna segmentacija:** slika se pretvori v barvni prostor HSV, nato
+  se izdela maska za modro oziroma cian barvo. Poleg HSV praga se preverja
+  tudi dominantnost modrega in zelenega kanala nad rdečim, kar izboljša
+  zaznavo pri različnih svetlobnih pogojih.
+
+- **Čiščenje maske:** nad masko se izvedeta morfološko odpiranje in
+  zapiranje, s čimer se odstranijo manjši šumi. Če je v maski premalo
+  modrih pikslov, sistem črte ne obravnava kot zanesljivo zaznane.
+
+- **Krmiljenje po centroidu:** iz momentov maske se izračuna centroid
+  črte. Horizontalni odmik centroida od sredine slike predstavlja napako,
+  iz katere se izračuna kotna hitrost robota. Večji kot je odmik črte od
+  sredine, močneje robot popravi smer.
+
+- **Glajenje gibanja:** kotni ukaz je omejen in dodatno zglajen z
+  eksponentnim filtrom, da robot ne reagira sunkovito na kratke motnje v
+  sliki.
+
+Za obravnavo razcepov je slika razdeljena na tri regije zanimanja:
+
+- **leva regija** zazna možnost zavoja v levo,
+- **sredinska regija** predstavlja nadaljevanje naravnost,
+- **desna regija** zazna možnost zavoja v desno.
+
+Če je aktivna samo sredinska regija, robot vozi naravnost z višjo
+hitrostjo. Ko je zaznana leva ali desna veja, vozlišče preide v način
+`split_active`, zmanjša hitrost in začne previdneje obravnavati razcep.
+Pri razcepih robot preferira levo smer, kar je izvedeno z dodatnim kotnim
+odmikom, vendar samo takrat, ko je leva veja dejansko vidna. Ko se robot
+po zavoju ponovno poravna na sredinsko črto, se po kratkem časovnem
+zadržanju vrne v običajen način sledenja.
+
+Delovanje vozlišča je organizirano kot stroj stanj:
+
+- `IDLE` - vozlišče je neaktivno in ne posega v gibanje robota.
+- `SEARCH` - robot počasi obrača in išče modro črto.
+- `FOLLOW` - robot sledi zaznani črti na podlagi centroida maske.
+- `UTURN` - obnovitveno stanje, ki se sproži ob izgubi črte, trku ali
+  preblizu zaznani oviri.
+
+Če robot izgubi črto za več kot približno 2 sekundi, se sproži
+obnovitveni obrat. Po končanem obratu se robot vrne v stanje `SEARCH` in
+ponovno poišče modro črto. Podobno se obnovitev sproži tudi ob zaznanem
+trku ali kadar LiDAR zazna oviro neposredno pred robotom. Pri manjši
+razdalji do ovire robot najprej zmanjša linearno hitrost, pri kritični
+razdalji pa izvede obrat.
+
+Za razhroščevanje in spremljanje delovanja vozlišče objavlja:
+
+- `/blue_line/debug_image` - označena slika z masko modre črte,
+  centroidom, regijami za smeri in trenutnim stanjem,
+- `/blue_line/status` - tekstovni opis trenutnega načina, števila modrih
+  pikslov, napake centroida in aktivnih smernih regij.
+
+Ti izhodi so bili uporabljeni pri nastavljanju pragov, preverjanju izbire
+smeri na razcepih in ugotavljanju, ali je robot v fazi iskanja, sledenja
+ali obnovitvenega obrata.
 
 ### 2.6 Izogibanje rumeni črti
--- tjas
+
+Izogibanje rumeni črti je namenjeno varnemu gibanju robota v prvi sobi,
+kjer robot ne sme zapeljati čez rumeno označena prepovedana območja.
+Funkcionalnost je implementirana kot ločeno vozlišče `yellow_line_avoider`.
+To vozlišče ne nadomešča Nav2 planiranja poti, temveč deluje kot reaktivni
+varnostni sloj nad običajno navigacijo. Ko rumena črta ni nevarno blizu,
+je vozlišče pasivno in ne objavlja hitrostnih ukazov. Ko zazna, da se je
+robot preveč približal rumeni črti, pa začasno prevzame nadzor nad
+gibanjem in robota umakne nazaj.
+
+Glavni deli delovanja so:
+
+- **Zajem slike:** rumena črta se zaznava iz slike zgornje kamere
+  (`/top_camera/rgb/preview/image_raw`), ki je usmerjena proti tlom.
+  Kamera omogoča neposreden pogled na območje pred robotom, kjer bi lahko
+  robot prečkal prepovedano oznako.
+
+- **Barvna segmentacija:** slika se pretvori v HSV barvni prostor, kjer
+  se izdela maska za rumeno barvo. Uporabljen je prag približno
+  `H = 18-35`, `S >= 100`, `V >= 80`, kar zajame rumeno talno oznako in
+  zmanjša vpliv manj nasičenih površin.
+
+- **Čiščenje maske:** maska se obdela z morfološkim zapiranjem in
+  odpiranjem, s čimer se odstranijo šum in manjši napačni segmenti.
+
+- **Nevarno območje:** sistem ne reagira na vsako rumeno zaznavo v sliki,
+  temveč preverja samo spodnji sredinski del slike. To območje predstavlja
+  del tal neposredno pred robotom. Če je v njem več kot nastavljeno število
+  rumenih pikslov, se črta obravnava kot nevarno blizu.
+
+Delovanje je organizirano v dve glavni stanji:
+
+- `CLEAR` - rumena črta ni v nevarnem območju. Vozlišče ne objavlja
+  hitrostnih ukazov, zato lahko Nav2, patrola ali druga vozlišča normalno
+  vodijo robota.
+
+- `BACKING` - rumena črta je zaznana v nevarnem območju. Robot se najprej
+  ustavi, nato pa se z majhno hitrostjo premakne nazaj. Privzeta hitrost
+  umika je približno `0,12 m/s`, umik pa traja približno `1,8 s`.
+
+Pri umiku vozlišče objavlja ukaze na dve temi: `/cmd_vel_unstamped` in
+`/cmd_vel`. S tem lahko začasno preglasi tako ukaze vozlišč paketa
+`task1` kot tudi izhod Nav2 sistema. Ukazi se med umikanjem objavljajo z
+visoko frekvenco, zato ima varnostni odziv prednost pred običajno
+navigacijo. Ko se umik zaključi, vozlišče pošlje ničelno hitrost in se
+vrne v stanje `CLEAR`.
+
+Vozlišče se lahko omogoči ali onemogoči prek teme `/yellow_line_enabled`.
+Med stanji, kjer rumena črta ni relevantna za navigacijo, na primer med
+prehodom na delovno postajo ali med sledenjem modri črti, se varovalo ne
+uporablja. Na ta način ne moti drugih delov sistema, ki imajo svoje
+lokalno krmiljenje.
+
+Za spremljanje in razhroščevanje se uporabljata:
+
+- `/yellow_line/debug_image` - označena slika z rumeno masko, nevarnim
+  območjem in trenutnim stanjem,
+- `/yellow_line_status` - tekstovni opis stanja, predvsem `CLEAR` ali
+  `BACKING`, ter število rumenih pikslov v nevarnem območju.
+
+Ob sprožitvi varovala robot dodatno izpiše oziroma izgovori opozorilo
+`Prohibited`, kar olajša razumevanje, zakaj se je navigacija nenadoma
+ustavila ali umaknila. Celoten pristop je preprost, vendar učinkovit:
+Nav2 še vedno skrbi za globalno navigacijo, `yellow_line_avoider` pa
+prepreči zadnji korak čez prepovedano rumeno črto.
 
 ### 2.7 Zaznavanje poškodb ploščic
 
@@ -841,12 +1043,17 @@ Skupno število točk: **\[XX\]**
 
 ### 4.2 Pravi robot (Task 1R)
 
-Na fizičnem robotu TurtleBot4 je sistem uspešno demonstriral: -
-zaznavanje in prepoznavanje obrazov v realnih svetlobnih pogojih, -
-zaznavanje sodov z OAK-D kamero in klasifikacijo barve, - sledenje modri
-črti s kamero in LiDARjem, - zaznavanje poškodb ploščic z armno kamero.
+Task 1R je bila implementacija prve naloge (Task 1) na fizičnem robotu in je zahteval zgolj zaznavanje obrazov in zaznavanje ter lokalizacijo obročev.
 
-*\[TUKAJ DODAJ SLIKO PRAVEGA ROBOTA PRI DELU\]*
+**Kamera.** Pravi robot namesto OAK-D kamere uporablja kamero Gemini RGBD. Vsi moduli so bili posodobljeni za teme `/gemini/color/image_raw/compressed`, `/gemini/depth/image_raw` in `/gemini/depth/points`. Ker smo imeli veliko problemov z zakasnjenostjo kamere smo morali narediti optimizacije. Stisnjene (compressed) teme so zmanjšale obremenitev WiFi za približno 15-kratnik. Lokalizacija objektov v 3D prostoru ne temelji na oblaku točk, temveč na back-projekciji prek intrinzičnih parametrov kamere (fx, fy, cx, cy), ki jih vozlišče samodejno prebere iz teme `/gemini/color/camera_info`.
+
+**Zaznavanje obrazov.** Namesto Haar detektorja je bil na pravem robotu uporabljen specializiran model YOLOv8n (`yolov8n-face-lindevs.pt`), ki teče na GPU. Ker je prvotni detektor zaznaval osebe za ograjo (zunaj dovoljene cone), je bilo zaznavanje omejeno s parametroma `face_crop_top=0.30` in `face_crop_bottom=0.70` — sprejemajo se le obrazi v srednji tretjini slike. Dodana je bila preveritev uniformnosti globine znotraj bounding boxa (`FACE_DEPTH_STD_MAX = 0.20 m`): ker so bili obrazi nalepljene fotografije na ograji, je nizek standardni odklon globine potrdil ravno površino; visok odklon je detekcijo zavrnil. Zaznani obrazi se lokalizirajo s povprečno globino zaplate (20×20 px) in pinhole-projekcijo v 3D.
+
+**Zaznavanje obročev.** Pri pravem robotu smo imeli kar nekaj težav z zaznavanjem obročev z implementacijo, ki je bila uporabljena na simulaciji. Zato smo natrenirali namenski model YOLOv8n za detekcijo obročev (`detect_rings_yolo.py`, model `~/ring_yolo/ring_det/weights/best.pt`). Učni nabor je bil generiran sintetično z orodjem `generate_ring_data.py`, ki je ustvarilo 3000 učnih in 600 validacijskih slik barvnih obročev (rdeča, zelena, modra, črna) na raznovrstnih ozadjih, skupaj z negativnimi primeri (zapolnjeni diski, sence, krožne oznake). Model je bil natreniran na 100 epohah z zgodnjim ustavljanjem (patience=20), velikost slike 416×416, na GPU.
+
+Zadetki so bili potrjeni z dvema zaporednima okvirjema (`yolo_confirm_frames=2`) ter z globinskim testom votlosti (sredina obroča mora biti dlje kot rob). Kot varnostna mreža je bil vgrajen HSV-ellipse fallback detektor (`enable_colour_fallback=true`), ki je prevzel zaznavanje kadar YOLO ni zaznal očitnih barvnih obročev; ta zahteva 4 zaporedne potrditve (`colour_confirm_frames=4`).
+
+Video delujočega robota si lahko ogledate na naslednji povezavi: [video](https://drive.google.com/drive/u/2/folders/1jx3x7DrQdfkEWfhQyGNvGYe20SZP5GIW)
 
 ------------------------------------------------------------------------
 
@@ -856,20 +1063,13 @@ zaznavanje sodov z OAK-D kamero in klasifikacijo barve, - sledenje modri
 
 **\[IME ČLANA 2\]** (\~\[XX\]% dela): - *\[dopolni\]*
 
-**Lara Mehle** (\~\[XX\]% dela): - Implementacija zaznavanja in
-prepoznavanja obrazov: vozlišči `face_recognizer` in `face_localizator`,
-vključno z integracijo knjižnice face_recognition, Caffe gender modela
-in grozdevanjem v map frame. - Implementacija zaznavanja in lokalizacije
-sodov/valjev: vozlišči `cylinder_localizator` in `barrel_inspector`,
-vključno z barvno klasifikacijo po HSV, določanjem orientacije in
-zaznavanjem razlitja. - Razvoj in treniranje U-Net modela za zaznavanje
-poškodb ploščic: skripta `unet_train.py` in `unet_evaluate.py`,
-integracija v vozlišče `tile_classifier` za realnočasno delovanje v ROS
-2. - Izhodišče implementacije zaznavanja obročev (osnovna arhitektura
-rešitve, ki je bila kasneje nadgrajena s strani ekipe). - Implementacija
-sistema na pravem robotu (Task 1R): prilagoditev zaznavanja obrazov,
-sodov in poškodb ploščic za fizični hardware, kalibracija in testiranje
-na realnem robotu.
+**Lara Mehle** (~[XX]% dela):
+
+- Zaznavanje in prepoznavanje obrazov: implementacija vozlišč `face_recognizer` in `face_localizator`, vključno z integracijo knjižnice face_recognition, Caffe modela za zaznavanje spola ter clustranjem zaznav v map frame.
+- Zaznavanje in lokalizacija sodov: implementacija vozlišč `cylinder_localizator` in `barrel_inspector`, vključno z barvno klasifikacijo po HSV, določanjem prostorske orientacije.
+- Zaznavanje poškodb ploščic: razvoj in treniranje U-Net modela (skripta `unet_train.py` in `unet_evaluate.py`) ter integracija v vozlišče `tile_classifier` za delovanje v realnem času v ROS 2.
+- Izhodišče implementacije zaznavanja obročev: osnovna arhitektura rešitve, ki je bila kasneje nadgrajena s strani ekipe.
+- Implementacija sistema na pravem robotu (Task 1R): prilagoditev zaznavanja obrazov in obročev za fizični hardware, kalibracija ter testiranje na realnem robotu.
 
 ------------------------------------------------------------------------
 
@@ -882,20 +1082,18 @@ vseh zaznav v globalnem koordinatnem sistemu, kar je zagotovilo
 robustnost kljub šumnim senzoričnim vhodom in nenatančnostim
 lokalizacije.
 
-**Programske težave:** - Zaznavanje obročev je bilo najzahtevnejša
-komponenta: Hougheva transformacija je bila občutljiva na svetlobne
-pogoje in ozadje v simulatorju. - Usklajevanje zaznavanja z navigacijo
-je povzročalo občasne tekmovalne pogoje (race conditions) pri hitrih
-zaporednih detekcijah. - *\[DOPOLNI Z OSTALIMI TEŽAVAMI\]*
+**Programske težave:**
 
-**Strojne težave:** - Omejena računska moč TurtleBot4 je upočasnila
-inferenco U-Net modela; na pravem robotu smo zmanjšali frekvenco
-zaznavanja. - OAK-D kamera ima omejeno vidno polje pri majhnih
-razdaljah, kar je oteževalo zaznavanje bližnjih objektov. - *\[DOPOLNI Z
-OSTALIMI TEŽAVAMI\]*
+- Zaznavanje obročev nam je povzročalo težave pri prvih dveh taskih. Prva implementacija v simulaciji je imela na določenih mapah veliko težav z zaznavanjem napačno pozitivnih obročev. Te probleme smo kasneje rešili z novim pristopom. Na pravem robotu (Task 1R) pa so bile težave še večje: različna osvetlitev, drugačna kamera (Gemini) in ozadje izven poligona so povzročali veliko lažnih zadetkov. Po večih preizkusih spreminjanja raznih pragov smo nazadnje pristopili k treniranju namenskega YOLO modela na sintetično generiranem učnem naboru, kar je bistveno izboljšalo robustnost.
+- Pri Task 2 smo imeli precej težav z zaznavanjem sodov: HSV segmentacija je bila občutljiva na osvetlitev, podobne barve okolja so povzročale lažne zadetke, določanje orientacije (pokončen/ležeč) pa je zahtevalo večkratno prilagajanje pragov.
+- Zaznavanje razlitja je bilo posebej zahtevno, saj je moral robot do vsakega ležečega soda posebej navigirati in se postaviti na ustrezno stran, da je kamera pokrivala tla ob sodu. To je pogosto povzročalo težave pri sodih, postavljenih ob ovirah ali v kotih prostora, kjer navigacijski sklad ni mogel najti ustrezne pristopne točke oziroma se robot ni mogel dovolj približati za zanesljivo detekcijo.
 
-Sistem je bil uspešno demonstriran na tekmovanju in dosegel **\[XX\]
-točk**.
+**Strojne težave:**
+
+- Simulacijsko okolje in celoten ROS 2 sklad zahtevata zmogljiv zelo računalnik. Razvoj je bil zato sploh v kasnejših fazah razvoja večinoma omejen na laboratorijske računalnike, ki pa jih je bilo na voljo premalo glede na število skupin, kar je oteževalo vzporedno delo in testiranje.
+- Posebej zahtevna je bila implementacija na pravem robotu. Roboti so bili pogosto zasedeni, se niso polnili, ali pa sploh niso delovali pravilno (Lidar se ni prižgal ipd.). Vsakodnevne težave s strojno opremo so bistveno upočasnile razvoj in testiranje IRL rešitve ter zmanjšale čas, ki smo ga imeli na voljo za kalibracijo in odpravljanje napak.
+
+
 
 ------------------------------------------------------------------------
 
@@ -903,15 +1101,3 @@ točk**.
 
 *\[Priložite generirano inšpekcijsko poročilo.\]*
 
-------------------------------------------------------------------------
-
-## Viri
-
-\[1\] Macenski, S. et al., "Navigation2: The Next Generation Navigation
-System for ROS", *IEEE IROS 2020*.\
-\[2\] Geitgey, A., "face_recognition",
-https://github.com/ageitgey/face_recognition\
-\[3\] Levi, G. and Hassner, T., "Age and Gender Classification Using
-Convolutional Neural Networks", *CVPR 2015*.\
-\[4\] Ronneberger, O., Fischer, P., and Brox, T., "U-Net: Convolutional
-Networks for Biomedical Image Segmentation", *MICCAI 2015*.
