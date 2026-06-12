@@ -2134,7 +2134,13 @@ Video delujočega robota si lahko ogledate na naslednji povezavi: [video](https:
 
 ## 5. Razdelitev dela
 
-**\[IME ČLANA 1\]** (\~ 1/3 dela): - *\[dopolni\]*
+**Tjaš Jelen** (\~ 1/3 dela):
+
+- Celotna navigacija robota in state flow za Task 2: zasnova ter implementacija navigacijskega toka z vozliščema `waypoint_navigator` in `behavior_manager`, vključno s fazami `IDLE`, `PATROL`, `APPROACH_FACE`, `INTERACT_FACE`, `APPROACH_BARREL`, `INTERACT_BARREL`, `APPROACH_WORKSTATION`, `FINISHING_ROUNDS` in `FOLLOW_BLUE_LINE`. Navigacijski tok zajema waypoint patruljo, začasne cilje za obraze in ležeče sode, nadaljevanje patrulje po interakcijah, prehod do delovne postaje, zaključno točko ter preklop v sledenje modri črti.
+- Sledenje modri črti: implementacija vozlišča `blue_line_explorer`, vključno z zaznavanjem modre črte v sliki, izbiro smeri na razcepih, obnovitvijo poti, objavljanjem hitrostnih ukazov in integracijo z navigacijskim stanjem `FOLLOW_BLUE_LINE`.
+- Izogibanje rumeni črti: implementacija reaktivnega varnostnega sloja `yellow_line_avoider`, vključno z zaznavanjem rumene barve, stanji `CLEAR`, `BACKING` in `RECOVERING`, preglasom hitrostnih ukazov ter podpornimi orodji za vris rumenih črt v mapo.
+- Zaznavanje obročev na pravem robotu: priprava in učenje YOLO modela za detekcijo obročev na fizičnem robotu, vključno s sintetičnim učnim naborom, prilagoditvijo na Gemini kamero ter integracijo detektorja za realno okolje.
+- Priprava navigacijskih točk za Task 2: dodajanje in prilagajanje waypointov v konfiguraciji naloge, testiranje obhodov po mapi ter usklajevanje waypoint patrulje z zaznavnimi in inšpekcijskimi fazami sistema.
 
 **\[Tristan Flander\]** (\~ 1/3 dela):
 - Generiranje inšpekcijskega poročila: implementacija vozlišča `report_manager`, vključno z zbiranjem podatkov iz vseh zaznavnih podsistemov, sledenjem identitete naročnikov ter generiranjem PDF in Markdown poročil z vdelanimi slikami.
