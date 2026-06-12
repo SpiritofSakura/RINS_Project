@@ -278,7 +278,80 @@ ponavljajočih se zaznav z mediano koordinat za odpornost na osamelce, -
 zaznav (obrazi: ≥5, obroči: ≥6, sodi: ≥10).
 
 ### 2.9 Inšpektor ploščic
--- tristan
+
+Inšpekcija ploščic je večstopenjski proces, ki se sproži na zahtevo po
+prebrani QR kodi in zajema navigacijo do delovne postaje, fino
+pozicioniranje ob tekočem traku, sistematično skeniranje ploščic ter
+ekstrakcijo čistih slik za klasifikacijo poškodb.
+
+**Zaznavanje in pomnjenje delovnih postaj.** Med patruliranjem sistem že
+vnaprej zaznava lokacije delovnih postaj. Vsaka postaja je označena z
+rdečo ali zeleno barvno črto na tleh. Zaznavanje poteka s HSV barvno
+segmentacijo slike iz OAK-D kamere, pri čemer se zaznani barvni segmenti
+dodatno filtrirajo po dolžini (min. 1,5 m), saj kratki segmenti
+pripadajo drugim objektom (npr. sodom). Za vsak segment se iz oblaka
+točk s PCA analizo izračuna centroid in smerni vektor, z ravnostnim
+filtrom pa se preveri, da gre res za talno oznako. Lokacija se potrdi
+šele po večkratni zaznavi (najmanj 10), s čimer se izloči šum; končna
+pozicija se določi kot mediana vseh kandidatov. Iz potrjene lokacije se
+izračuna pristopna točka, ki je odmaknjena približno 1 m od linije v
+smeri proti robotu --- tako dobi sistem varno razdaljo za začetek finega
+pozicioniranja.
+
+**Orkestracija.** Ko robot prebere QR kodo z navodilom za inšpekcijo
+določene delovne postaje (rdeče ali zelene), se zahteva shrani v vrsto.
+Izvedba se ne začne takoj: sistem najprej počaka, da je patrola končana
+in da robot vstopi v namensko stanje za delovne postaje. Šele nato se
+sproži inspekcijska sekvenca. Če je v vrsti več zahtev, se izvajajo
+zaporedno.
+
+**Navigacija in fino pozicioniranje.** Robot se najprej z navigacijo
+Nav2 pripelje do vnaprej shranjene pristopne točke. Sledi petstopenjsko
+fino pozicioniranje:
+
+1.  *Približevanje tekočemu traku:* robot vozi naravnost naprej, dokler
+    LiDAR ne zazna ovire na razdalji približno 0,30 m -- takrat ve, da
+    je dosegel trak.
+2.  *Poravnava orientacije:* robot se zavrti na mestu do vnaprej
+    določenega ciljnega kota, ki ustreza smeri tekočega traku za izbrano
+    barvo postaje. Orientacija se sproti preverja prek TF transformacij.
+3.  *Fina poravnava s kamero:* s pomočjo Houghove transformacije na
+    sliki zgornje kamere robot zazna linije ploščic na tekočem traku
+    in se zavrti tako, da je nagib minimalen (pod 0,5°). S tem doseže
+    natančno vzporednost s trakom.
+4.  *Vzvratna vožnja:* robot vozi nazaj, dokler z OAK-D kamero ne zazna
+    rumene črte na tleh, ki označuje začetek območja skeniranja. Če
+    rumene črte ne zazna, se ustavi ob zaznavi ovire v zadnjem LiDAR
+    stožcu.
+5.  *Skeniranje:* robot vozi počasi naprej vzdolž traku in hkrati s
+    spodnjim vidnim poljem OAK-D kamere preverja, ali je še v območju
+    delovne postaje (zaznava rdeče oziroma zelene barve). Ko barvni
+    marker izgine, robot ve, da je dosegel konec postaje, in se po kratki
+    dodatni vožnji (za zajem morebitnih zadnjih ploščic) ustavi. Med
+    skeniranjem se ob vsaki zaznani ploščici za kratek čas ustavi
+    (2--4 s), da kamera zajame stabilno sliko brez gibalne zamegljenosti.
+
+**Ekstrakcija slik ploščic.** Detekcija posamezne ploščice poteka s
+pragovno segmentacijo (Otsu) na sliki zgornje kamere, ki gleda
+pravokotno na ploščice. Svetle ploščice se ločijo od temne podlage
+tekočega traku. Za robustnost se pred detekcijo uporabi svetlostni
+sprožilec -- ploščica se išče le, če je v kontrolnem območju slike
+dovolj visoka svetlost, kar prepreči lažne zaznave. Ko je ploščica
+zaznana, se njene natančne robne točke določijo s konveksno ogrinjačo
+in Douglas-Peucker aproksimacijo, kar da štiri oglišča tudi, če rotiran
+okvir (minAreaRect) ne zajame natančno robov. Nato se z izračunom
+homografije izvede perspektivna korekcija, ki ploščico projicira v
+fronto-paralelni pogled -- s tem se odpravi morebitna perspektivna
+deformacija in ploščica je pripravljena za klasifikator v
+standardizirani obliki. Dodatno se robovi zožijo za približno 6 %, da
+se izreže morebitno ozadje ob robovih. Zajem slike se izvede z
+zakasnitvijo 0,5 s po ustavitvi robota, s čimer se počaka, da se
+tresljaji umirijo in je slika res ostra.
+
+**Zaključek.** Po končanem skeniranju se robot obrne za približno 130°
+stran od traku in se odpelje na varno razdaljo, s čimer zapusti
+delovno območje. Inspekcija se zaključi, rezultati klasifikacije pa se
+zabeležijo v končno poročilo.
 
 ------------------------------------------------------------------------
 
@@ -335,7 +408,18 @@ in servisov (services). Spodnja tabela povzema ključna vozlišča.
                                       celotnega sistema
   -----------------------------------------------------------------------
 
-### 3.2 Zaznavanje obrazov
+### 3.2 Integracija v ROS 2
+
+Vse komponente se zaženejo z `task1.launch.py`. Nav2 sklad se zažene
+ločeno z `localization.launch.py`. Vozlišča komunicirajo prek: -
+**Tematik (topics)**: zaznave, slike, markerji, stanja robota, - **Akcij
+(actions)**: navigacija (`NavigateToPose`), - **Servisov (services)**:
+inšpekcija razlitja (`/``spill_check`).
+
+Za vizualizacijo in razhroščevanje smo v RViz2 prikazali vse zaznavne
+markerje in stanje sistema.
+
+### 3.3 Zaznavanje obrazov
 
 `FaceRecognizer` se naroči na temo
 `/``oakd``/``rgb``/``preview``/``image_raw`. Detekcija poteka pri 2 Hz
@@ -354,7 +438,7 @@ in servisov (services). Spodnja tabela povzema ključna vozlišča.
 `FaceLocalizator` grupira zaznave v oblake (cluster radius 0,6 m) in s
 TF2 pretvori položaj v map frame. Obraz je potrjen po ≥5 zaznav.
 
-### 3.3 Zaznavanje sodov
+### 3.4 Zaznavanje sodov
 
 `CylinderLocalizator` sprejema segmentacije iz
 `/``detected_cylinder_locations` (že v map frame). Za vsako zaznavo:
@@ -368,7 +452,7 @@ TF2 pretvori položaj v map frame. Obraz je potrjen po ≥5 zaznav.
     (pokončen/ležeč),
 6.  `BarrelInspector` sproži `/``spill_check` servis po potrditvi.
 
-### 3.4 Zaznavanje poškodb ploščic
+### 3.5 Zaznavanje poškodb ploščic
 
 `TileClassifier` se naroči na sliko armne kamere. Za vsako sliko:
 
@@ -380,16 +464,364 @@ TF2 pretvori položaj v map frame. Obraz je potrjen po ≥5 zaznav.
 5.  Poškodba zaznana, če razmerje poškodovanih pikselov \> 0,2 %;
     rezultat objavi na `/``tile_defect`.
 
-### 3.5 Integracija v ROS 2
 
-Vse komponente se zaženejo z `task1.launch.py`. Nav2 sklad se zažene
-ločeno z `localization.launch.py`. Vozlišča komunicirajo prek: -
-**Tematik (topics)**: zaznave, slike, markerji, stanja robota, - **Akcij
-(actions)**: navigacija (`NavigateToPose`), - **Servisov (services)**:
-inšpekcija razlitja (`/``spill_check`).
+### 3.9 Inšpektor ploščic
 
-Za vizualizacijo in razhroščevanje smo v RViz2 prikazali vse zaznavne
-markerje in stanje sistema.
+#### 3.9.1 Zaznavanje in pomnjenje lokacije delovne postaje
+
+Že med patruliranjem (preden robot prejme kakršnokoli navodilo za
+inšpekcijo) sistem sproti zaznava in si zapomni lokacije delovnih postaj.
+Ta proces temelji na barvno označenih linijah na tleh ob vsaki delovni
+postaji (rdeča ali zelena).
+
+**LineLocalizator** (`line_localizator.py`) je prvo vozlišče v verigi.
+Naroči se na OAK-D kamero: RGB sliko (`/oakd/rgb/preview/image_raw`),
+globinsko sliko (`/oakd/rgb/preview/depth`) in oblak točk
+(`/oakd/rgb/preview/depth/points`). Aktivno deluje le, kadar je robot v
+stanjih patruliranja (ne v stanjih sledenja črti):
+
+1.  HSV segmentacija se izvede za štiri barvne razrede (rdeča, zelena,
+    modra, rumena), pri čemer rdeča uporablja dve ločeni maski za spodnji
+    in zgornji del HSV obroča (0--10° in 170--180°). Zgornja polovica
+    slike se ignorira, saj tam ni talnih oznak.
+2.  Morfološko zapiranje z eliptičnim jedrom 5×5 px zapolni luknje v
+    maskah.
+3.  Konture se filtrirajo po minimalni površini (80 px) in minimalnem
+    razmerju stranic (3:1), s čimer se izločijo drobni ali okrogli
+    segmenti (npr. delci sodov).
+4.  Vsaka kontura se dodatno razdeli na manjše linearne segmente s
+    **skeletonizacijo** -- morfološko stanjšanjem maske do enopikslovnega
+    skeleta, na katerem se z `HoughLinesP` poiščejo ravne črte.
+5.  Za vsak segment se iz oblaka točk vzamejo 3D točke znotraj maske
+    segmenta (filtrirane na razdaljo < 7 m in min. 15 veljavnih točk),
+    nato se s PCA (analizo glavnih komponent) izračuna centroid in smerni
+    vektor segmenta.
+6.  **Filter ravnosti**: segment je veljaven le, če je standardni odklon
+    vzdolž najmanjše lastne osi manjši od praga (`max_flat_std` = 0,03
+    m), kar zagotavlja, da gre res za talno oznako in ne navpičen objekt.
+7.  Veljavni segmenti se objavijo kot `Marker.LINE_STRIP` na temo
+    `/line_markers` z ustreznim barvnim atributom (`color.r` / `color.g`).
+
+**WorkstationRecorder** (`workstation_recorder.py`) se naroči na
+`/line_markers`. Ob prejemu rdečega ali zelenega markerja:
+
+1.  S TF2 transformira obe krajišči segmenta v `map` koordinatni sistem.
+2.  **Filtrira kratke segmente**: linija mora biti dolga vsaj 1,5 m, s
+    čimer se izločijo markerji sodov (ki so dolgi ~0,2 m).
+3.  Izračuna **položaj za približevanje** (approach point): najprej
+    izračuna centroid linije, nato od njega odmakne točko v smeri proti
+    robotu za razdaljo `stop_distance` (privzeto 1 m). Yaw se izračuna
+    kot smer od linije proti robotu (`atan2(-dy, -dx)`).
+4.  Kandidate zbira, dokler ne doseže praga **CONFIRM_COUNT = 10**
+    (deset potrditev), kar zagotavlja robustnost proti šumnim zaznavam.
+5.  Po doseženem pragu izračuna **mediano** vseh kandidatov (centroidov)
+    za x, y in yaw ter lokacijo **zaklene** (`red_locked` / `green_locked`).
+6.  Zaklenjena lokacija se objavi kot `MarkerArray` z dvema markerjema:
+    `CYLINDER` (barvni valj kot vizualna oznaka) in `TEXT_VIEW_FACING`
+    (napis "WS") na temo `/workstation_markers`.
+
+Ta tema je ključna, saj jo posluša **orkestrator**, ki bo kasneje
+vedel, kam poslati robota (glej 3.9.2). V načinu `--mode toYAML` lahko
+WorkstationRecorder lokacije tudi trajno shrani v datoteko YAML za
+kasnejšo uporabo.
+
+---
+
+#### 3.9.2 Orkestracija inspekcijskega toka
+
+**Orchestrator** (`orchestrator.py`) je centralno vozlišče, ki koordinira
+celotno izvajanje inspekcije. Njegova vloga v inspekcijskem toku:
+
+1.  **Pomnjenje waypointov**: ob prejemu `MarkerArray` na
+    `/workstation_markers` (glej 3.9.1) iz CYLINDER markerjev izlušči
+    barvo (rdečo ali zeleno) in si shrani (x, y, yaw) pod ustreznim
+    ključem v slovar `_waypoints`.
+
+2.  **Sprožitev prek QR kode**: ko robot prebere QR kodo z navodilom
+    oblike `"defects red"` ali `"defects green"`, orkestrator to barvo
+    doda v množico `_pending_defects`. Inspekcija se ne sproži takoj --
+    čaka se na izpolnitev **vseh treh pogojev**:
+    - patrol je končan (`/patrol_finished = True`),
+    - robot je v stanju `"WORKSTATION"` (objavljeno na `/robot_state`),
+    - waypoint za to barvo je že znan (tj. WorkstationRecorder ga je že
+      zaklenil).
+
+3.  **Zagon inspectorja**: ko so vsi trije pogoji izpolnjeni in ni
+    drugega inspectorja v teku, orkestrator:
+    - Objavi waypoint na `/orchestrator_out` (sporočilo `PoseStamped` z
+      `header.frame_id` nastavljenim na barvo postaje).
+    - Zažene `station_inspector.py` kot **ločen proces** (subprocess) s
+      parametri `workstation:=<color>`, `use_yaml:=False`,
+      `use_orchestrator:=True`. Proces se zažene s
+      `preexec_fn` za ignoriranje SIGINT (da se ne ubije ob prekinitvi
+      orkestratorja).
+
+4.  **Spremljanje in zaključek**: orkestrator v svojem časovniku (0,1 s)
+    spremlja izhodno kodo inspector procesa (`_inspector_proc.poll()`).
+    Ko se inspector konča:
+    - Objavi `Empty` sporočilo na `/workstation_done`, kar signalizira
+      preostalemu sistemu, da je inspekcija končana in se lahko nadaljuje
+      z naslednjo nalogo.
+    - Če ima shranjeno prejšnjo pozo robota (`_saved_pose`), se robot
+      vrne na to lokacijo prek NavigateToPose. To velja za primer, ko
+      inspekcija poteka med patruliranjem (ne po patrolu).
+
+---
+
+#### 3.9.3 Station Inspector: celoten inspekcijski tok
+
+**StationInspector** (`station_inspector.py`) je glavno vozlišče, ki
+izvaja celotno sekvenco inspekcije. Njegovo delovanje je modelirano kot
+končni avtomat s stanji: `INSPECTOR_INACTIVE`, `NAV_TO_WS`,
+`FINE_POSITION` (z več podfazami). Vsako stanje ima natančno določene
+pogoje za prehod v naslednje stanje.
+
+##### Inicializacija in pridobitev ciljne lokacije
+
+V stanju **INSPECTOR_INACTIVE** inspector potrebuje ciljno lokacijo
+delovne postaje. Podprta sta dva načina:
+
+- **YAML način** (`use_yaml=True`): naloži pristopno točko iz datoteke
+  `test_workstation_locations.yaml`, ki vsebuje vnaprej posnete (x, y,
+  yaw) koordinate. Če datoteka obstaja in vsebuje ključ za izbrano barvo,
+  se takoj shrani v `self.approach_pose` in preide v NAV_TO_WS.
+
+- **Orkestratorski način** (`use_orchestrator=True`): inspector najprej
+  pošlje zahtevo `"get_{color}_waypoint"` na `/orchestrator_in` in nato
+  čaka na odgovor na `/orchestrator_out`. Sporočilo vsebuje `PoseStamped`
+  s `header.frame_id` enakim izbrani barvi. Ko ga prejme, si shrani
+  (x, y, yaw) in preide v NAV_TO_WS.
+
+##### Navigacija do delovne postaje (NAV_TO_WS)
+
+V tem stanju inspector:
+
+1.  Počaka, da je Nav2 akcijski strežnik `navigate_to_pose` na voljo.
+2.  Pošlje `NavigateToPose` cilj na pristopno točko -- točko, ki je 1 m
+    oddaljena od linije delovne postaje v smeri proti robotu.
+3.  **Pogoj za prehod v naslednjo fazo**: `nav_goal_done == True` in
+    `nav_succeeded == True`.
+4.  Ob uspešni navigaciji:
+    - **Zažene podprocesa** `tile_detect` in `tile_classifier` -- to sta
+      ločeni ROS vozlišči, ki ju inspector upravlja kot subprocessa
+      (terminirata se ob `destroy_node()` inspectorja).
+    - Objavi barvo postaje na `/inspector_station`.
+    - Pošlje ukaz roki (`/arm_command`) `"look_at_belt_left"` -- roka
+      (top kamera) se usmeri na levi del tekočega traku.
+    - Preide v stanje **FINE_POSITION** s podfazo 0.
+
+Ob neuspešni navigaciji poskusi znova -- ponastavi `nav_goal_sent` in
+ostane v NAV_TO_WS.
+
+##### Fino pozicioniranje (FINE_POSITION)
+
+To je najkompleksnejše stanje, razdeljeno na šest podfaz (0--5). Vsaka
+podfaza ima svoj pogoj za prehod.
+
+**Podfaza 0 -- Približevanje steni (tekočemu traku):**
+- Robot vozi naravnost naprej proti delovni postaji s hitrostjo 0,15 m/s,
+  ki se upočasni na 0,03 m/s, ko je oddaljenost manjša od 0,45 m.
+- Oddaljenost meri z LiDARjem v smeri naprej (kotni stožec ±45° okoli
+  smeri naravnost naprej, tj. center pri -π/2 glede na orientacijo
+  LiDARja).
+- **Pogoj za prehod**: `min_dist <= 0,30 m` -- robot se je dovolj
+  približal tekočemu traku. Prehod v podfazo 1.
+
+**Podfaza 1 -- Poravnava orientacije (rotacija v smeri traku):**
+- Robot se zavrti na mestu, da se poravna vzporedno s tekočim trakom.
+- Ciljni yaw je odvisen od barve postaje:
+  - rdeča postaja: ciljni yaw = π rad (180°, obrnjen "nazaj" proti
+    prostoru),
+  - zelena postaja: ciljni yaw = π/2 rad (90°).
+- Trenutni yaw se bere iz TF transformacije `map → base_link` (oz.
+  `base_footprint`).
+- P-regulator z ojačanjem 0,5, nasičen na ±0,4 rad/s.
+- **Pogoj za prehod**: `abs(yaw_diff) <= 0,05 rad`. Prehod v podfazo 2.
+
+**Podfaza 2 -- Fina poravnava s Houghovo transformacijo:**
+- Uporablja **zgornjo kamero** (top camera, nameščeno na roki), ki gleda
+  na ploščice od zgoraj. Slika se zajema v sivinskih tonih (`mono8`) iz
+  teme `/top_camera/rgb/preview/image_raw`.
+- Algoritem za zaznavo nagiba tekočega traku:
+  1. Izračuna **vertikalni diferencial** (absolutna razlika sosednjih
+     vrstic) zgornje polovice slike -- robovi ploščic na tekočem traku
+     tvorijo horizontalne (oz. skoraj horizontalne) linije, ki se v
+     top-down pogledu kažejo kot vertikalni gradienti.
+  2. Diferencial se normalizira na [0, 255] in z Gaussovim glajenjem
+     (3×3) zgladi.
+  3. Otsu binarizacija loči robove od ozadja.
+  4. `cv2.HoughLines` poišče linije s pragom 80 glasov. Zanimajo nas
+     linije blizu vertikale: `abs(theta - π/2) < 20°`.
+  5. Iz prve najdene linije se izračuna **kot nagiba** (tilt) v
+     stopinjah: `(theta - π/2)`.
+- P-regulator z ojačanjem 0,15 (in maksimalno hitrostjo 0,1 rad/s)
+  minimizira nagib.
+- **Pogoj za prehod**: `abs(tilt) <= 0,5°`. Robot je natančno poravnan
+  s tekočim trakom. Prehod v podfazo 3.
+
+**Podfaza 3 -- Vzvratna vožnja do začetka skeniranja:**
+- Robot vozi nazaj s hitrostjo 0,15 m/s.
+- Med vožnjo preverja **dva pogoja za ustavitev** (katerikoli je
+  izpolnjen prej):
+  1. **Zaznava rumene črte**: OAK-D kamera spodnji levi kot (zadnjih 30
+     vrstic, leva polovica slike). V tem ROI se izračunajo maske za
+     rumeno, rdečo in zeleno barvo (HSV). Pogoj za rumeno črto: število
+     rumenih pikslov > (rdečih + zelenih) / 2. Rumeno črto se uporablja
+     kot marker začetka območja skeniranja.
+  2. **Zaznava ovire zadaj**: LiDAR v zadnjem stožcu (center pri 200°
+     glede na orientacijo LiDARja, polovični kot 20°). Če je razdalja ≤
+     0,40 m, se robot ustavi -- to je varnostni pogoj, če rumene črte ni
+     mogoče zaznati.
+- **Pogoj za prehod**: ko je eden od obeh pogojev izpolnjen, se robot
+  ustavi, objavi podstanje `"SCAN_TILES"` in preide v podfazo 4.
+
+**Podfaza 4 -- Skeniranje ploščic na tekočem traku:**
+- Robot vozi počasi naprej vzdolž traku s hitrostjo 0,08 m/s.
+- Med vožnjo **neprekinjeno preverja barvo delovne postaje** v spodnjem
+  levem kotu OAK-D kamere (zadnjih 30 vrstic, leva polovica):
+  - Za rdečo postajo: HSV maske za rdečo (dva obsega: 0--10° in
+    170--180°),
+  - Za zeleno postajo: HSV maska za zeleno (40--80° v odtenku).
+  - Pogoj za prisotnost barve: razmerje barvnih pikslov > 15 % ROI.
+- Ko barve **ni več** (`no_colour == True`), je robot prišel do konca
+  delovne postaje. Takrat si zabeleži čas `_end_belt_start` in **vozi
+  še 5 sekund naprej**, da zajame še zadnje ploščice, ki so morda še na
+  traku.
+- Med skeniranjem `tile_detect` vozlišče (opisano v 3.9.4) prepoznava
+  ploščice in objavlja status na temo `/tile_status`:
+  - `"TILE_FOUND"`: robot se **ustavi za 2--4 sekunde** (2 s normalno,
+    4 s če smo že za koncem barvne oznake -- da klasifikator dobi dovolj
+    časa za zajem čiste slike). V tem času `tile_detect` zajame in
+    objavi warpano sliko ploščice (glej 3.9.4), `tile_classifier` pa
+    izvede inferenco. Po preteku časa robot nadaljuje vožnjo.
+  - `"TILE_LEFT"`: ploščica je zapustila vidno polje, robot lahko
+    nadaljuje z iskanjem naslednje.
+- **Pogoja za prehod v podfazo 5 (zaključek):**
+  1. Barva ni več vidna (`no_colour == True`) IN zadnja ploščica je bila
+     obdelana (počakal se je 4-sekundni interval po `TILE_FOUND`) ALI
+  2. Barva ni več vidna IN 5 sekund ni bila zaznana nobena ploščica.
+- Ob prehodu robot ustavi motorje, premakne roko s kamero v položaj
+  `"look_for_spill"` (preverjanje razlitja) in preide v podfazo 5.
+
+**Podfaza 5 -- Umik z delovne postaje (ESCAPING_WORKSTATION):**
+- **Korak 0 (rotacija)**: robot se zavrti za 130° v smeri urinega
+  kazalca (CW), da se obrne proč od tekočega traku. P-regulator z
+  ojačanjem 0,5, nasičen na ±0,4 rad/s. Pogoj za prehod: razlika v
+  kotu ≤ 0,05 rad.
+- **Korak 1 (odmik naprej)**: robot vozi naravnost naprej s hitrostjo
+  0,3 m/s **4 sekunde** -- dovolj, da se popolnoma odmakne od delovnega
+  območja.
+- **Korak 2 (zaključek)**: robot se ustavi, objavi `"finished"` na temo
+  `/inspector_finish`, nato pa se po 0,5 sekunde vozlišče **samodejno
+  ugasne** (`rclpy.shutdown()`).
+
+---
+
+#### 3.9.4 Detekcija in ekstrakcija čistih slik ploščic (TileDetect)
+
+**TileDetect** (`tile_detect.py`) je ločeno vozlišče, ki se zažene kot
+podproces inspectorja. Njegova naloga je iz top-down slike zgornje kamere
+zaznati ploščico, določiti njene natančne robove in izrezati perspektivno
+korigirano (warpano) sliko, ki gre nato v klasifikator. Vozlišče deluje
+vseskozi, vendar **ploščice aktivno išče le med fazo skeniranja**
+(`inspector_phase == 4`).
+
+**Svetlostni sprožilec (brightness trigger):**
+- Ker ploščice na tekočem traku odsevajo več svetlobe kot temno ozadje
+  traku, se prisotnost ploščice najprej zazna prek svetlosti.
+- Pregleduje se majhen ROI velikosti 20×10 px v sredini leve tretjine
+  slike (`gray[h/2-5:h/2+5, w/3-10:w/3+10]`).
+- Če je ≥ 50 % pikslov svetlejših od praga 100, se števec `_bright_hit`
+  poveča. **Po 3 zaporednih pozitivnih okvirih** se sprožilec aktivira
+  (`_bright_ready = True`).
+- Če svetlost pade, se števec `_bright_missed` povečuje; **po 10
+  zaporednih negativnih okvirih** se sprožilec deaktivira.
+- S tem se izognemo lažnim sprožitvam zaradi trenutnih odsevov.
+
+**Zaznava ploščice (`_find_tile`):**
+1.  Slika se obreže -- zgornja petina se zavrže (ozadje, ki ni del
+    tekočega traku).
+2.  **Otsu binarizacija** na preostanku slike loči svetlo ploščico od
+    temne podlage.
+3.  Če je centralni piksel (center obrezane slike) črn, se binarna maska
+    invertira -- to popravi primer, ko Otsu obrne vlogi ospredja in
+    ozadja.
+4.  **Morfološko zapiranje** z eliptičnim jedrom 5×5 px.
+5.  Iskanje kontur s filtriranjem:
+    - Površina med 5 % in 50 % celotne površine obrezane slike,
+    - **Razmerje stranic ≤ 2,0** (da izločimo podolgovate objekte, ki
+      niso kvadratne/okrogle ploščice).
+6.  Izbere se kontura z največjo površino, ki ustreza pogojem. Iz nje se
+    izračuna `minAreaRect` in pripadajoči 4-točkovni okvir (`box`).
+
+**Zaznava natančnih robnih točk (`_get_tile_quad`):**
+- Namesto `minAreaRect` okvirja (ki je lahko rotiran bounding box in ne
+  nujno natančno sledi robovom) se za natančno določitev 4 oglišč
+  uporabi:
+  1. **Največja kontura** v polni maski.
+  2. **Konveksna ogrinjača** (`convexHull`) -- zapolni morebitne
+     konkavnosti.
+  3. **Douglas-Peucker aproksimacija** (`approxPolyDP`) z epsilon = 2 %
+     obsega ogrinjače. Rezultat je natančen štirikotnik le, če
+     aproksimacija vrne natanko 4 točke. V nasprotnem primeru se
+     uporabi kar `minAreaRect` okvir.
+
+**Števec ploščic in časovna logika:**
+- Ko je ploščica prvič zaznana (`_tile_was_visible == False` → `True`):
+  - poveča se globalni števec `_count`,
+  - shrani se okvir (`_last_box`) in natančne robne točke
+    (`_last_corners`),
+  - nastavi se `_capture_pending = True` in zabeleži čas prve zaznave,
+  - objavi se `"TILE_FOUND"` na `/tile_status`.
+- Ko ploščica izgine za **5 zaporednih okvirjev**
+  (`_tile_missed >= 5`), se objavi `"TILE_LEFT"`, robne točke se
+  izbrišejo, stanje se vrne v "ni ploščice".
+
+**Perspektivna korekcija in objava warpa (`_warp_tile`):**
+1.  **Urejanje točk** (`_order_points`): 4 točke se uredijo po vrstnem
+    redu: zgoraj-levo, zgoraj-desno, spodaj-desno, spodaj-levo. Najprej
+    se razdelijo po y-koordinati (zgornji/spodnji par), nato še po
+    x-koordinati.
+2.  **Inset (zarez)**: vsaka točka se premakne za **6 % proti obema
+    sosednjima točkama** (`src[i] += 0.06*(prev-src[i]) +
+    0.06*(next-src[i])`). To zmanjša območje za 6 % z vsake strani, s
+    čimer se izreže morebitni rob, ki bi vključeval ozadje.
+3.  **Ciljni pravokotnik**: širina = max razdalje med zgornjima in
+    spodnjima točkama, višina = max razdalje med levima in desnima
+    točkama.
+4.  **Homografija**: `cv2.getPerspectiveTransform(src, dst)` izračuna
+    perspektivno transformacijo, `cv2.warpPerspective` projicira
+    ploščico v fronto-paralelni pogled.
+5.  Warpana slika (BGR) se objavi na `/tile_warped` s `header.frame_id`
+    nastavljenim na `str(self._count)` -- kar omogoča identifikacijo
+    zaporedne številke ploščice.
+
+**Časovna zakasnitev zajema:**
+- Po prvi zaznavi ploščice se zajem **ne sproži takoj**, ampak šele **po
+  0,5 sekunde** (`time_module.time() - trigger_time >= 0.5`). Ta
+  zakasnitev je ključna: v tem času se robot ustavi (inspector ga je
+  ustavil ob `TILE_FOUND`), tresljaji se umirijo in slika je stabilna --
+  warpana ploščica je tako ostra in nepremaknjena.
+- Zajem se izvede **natanko enkrat** na ploščico (`_capture_done = True`
+  prepreči ponovne zajeme).
+
+---
+
+#### 3.9.5 Zaključek inspekcijskega toka
+
+Ko se inspector konča (podfaza 5, korak 2), se:
+1.  Objavi `"finished"` na `/inspector_finish`, kar je signal za vozlišče
+    `report`, da lahko zabeleži rezultate inspekcije.
+2.  Inspector vozlišče se samodejno ugasne (`rclpy.shutdown()`).
+3.  Orkestrator zazna izhod procesa (`poll() != None`), objavi prazno
+    sporočilo na `/workstation_done` in s tem signalizira preostanku
+    sistema, da je inspekcija te delovne postaje zaključena.
+4.  Podprocesa `tile_detect` in `tile_classifier` se terminirata ob
+    `destroy_node()` inspectorja.
+
+V primeru, da sta v vrsti dve inspekciji (npr. po VREDNE aktivnosti),
+orkestrator po končani prvi samodejno sproži drugo (če so izpolnjeni vsi
+trije pogoji iz 3.9.2).
 
 ------------------------------------------------------------------------
 
